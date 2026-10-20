@@ -2,6 +2,8 @@
 
 English · [简体中文](README.zh-CN.md)
 
+![Agenest](docs/social-preview.png)
+
 **One page that watches coding agents, and one page that talks to yours:**
 
 ```
@@ -19,6 +21,19 @@ agent that runs beside this service; that agent does the work, with your keys. A
 dials a remote machine — its one client connection is to the personal agent beside it.
 [docs/design.md](docs/design.md) records why each boundary sits where it does, and what was
 deliberately left out.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="images/performance1.jpg" width="260" alt="Overview"><br><sub>Overview — running, needs attention, finished</sub></td>
+    <td align="center"><img src="images/performance2.jpg" width="260" alt="Sessions"><br><sub>Sessions grouped by host → harness → project</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/performance3.jpg" width="260" alt="Session detail"><br><sub>Session detail — outcome, workspace, timeline</sub></td>
+    <td align="center"><img src="images/performance4.jpg" width="260" alt="Agent"><br><sub>Agent — a working conversation with your personal agent</sub></td>
+  </tr>
+</table>
 
 ## Why Agenest
 
@@ -45,7 +60,11 @@ process) that needs nothing but a provider key.
 | Layer | What works today |
 |---|---|
 | Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), Codex, or anything that can call `cpctl` from a wrapper |
-| Personal agents (the channel) | `native` — the built-in Pi process; nanobot; OpenClaw; Hermes Agent |
+| Personal agents (the channel) | `native` — the built-in personal agent, **built on Pi** (`@earendil-works/pi-coding-agent`); nanobot; OpenClaw; Hermes Agent |
+
+The built-in `native` agent is a Pi process this service starts itself. **Pi is the agent loop;
+Agenest is the dashboard and the channel around it** — not a replacement for Pi, and not an
+agent implementation of its own.
 
 A new coding agent needs a reporter (`cpctl` or a wrapper), not a change here. A new personal
 agent is a backend module in `backend/app/agent/backends/` — the registry finds it by scan.

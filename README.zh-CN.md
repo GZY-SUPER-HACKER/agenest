@@ -2,6 +2,8 @@
 
 [English](README.md) · 简体中文
 
+![Agenest](docs/social-preview.png)
+
 Agenest 是一个手机优先的 coding agent control plane，以 PWA 形式安装，体验接近原生 App。
 它自带一个 personal agent，用来给你所有的 coding agent 指派任务和汇总进度，也可以接入你已有的
 personal agent。
@@ -16,6 +18,19 @@ coding agent 跑任务 → cpctl 上报 → 服务端持久化 → SSE 推送 �
 不发远程命令、不推断 agent 状态。后半部分不是监控，而是一个通往 personal agent 的通道：
 真正干活的是那个 agent，用的是你的凭据。Agenest 不会主动连接远程机器；它唯一的客户端连接，
 是同一台机器上、就在它旁边的那个 personal agent。
+
+## 效果图
+
+<table>
+  <tr>
+    <td align="center"><img src="images/performance1.jpg" width="260" alt="总览"><br><sub>总览：运行中 / 需要关注 / 已完成</sub></td>
+    <td align="center"><img src="images/performance2.jpg" width="260" alt="Sessions"><br><sub>Sessions：按 机器 → harness → 项目 分组</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/performance3.jpg" width="260" alt="会话详情"><br><sub>会话详情：outcome、workspace、时间线</sub></td>
+    <td align="center"><img src="images/performance4.jpg" width="260" alt="Agent 页"><br><sub>Agent 页：和 personal agent 的一次真实协作</sub></td>
+  </tr>
+</table>
 
 ## 为什么做 Agenest
 
@@ -41,7 +56,10 @@ Agenest 提供这样一个机会：把它和你的 personal agent 部署在一�
 | 层 | 支持情况 |
 |---|---|
 | Coding agent（被观察、可被驱动） | Claude Code（`sdk/csd-agent` 的 hooks）、Codex，以及任何能调用 `cpctl` 的包装脚本 |
-| Personal agent（通道） | `native`（内置 Pi 进程）、nanobot、OpenClaw、Hermes Agent |
+| Personal agent（通道） | `native`（内置，**基于 Pi 构建**，`@earendil-works/pi-coding-agent`）、nanobot、OpenClaw、Hermes Agent |
+
+`native` 不是一个自研的 agent loop，而是本服务启动的一个 Pi 进程。**Pi 负责 agent 循环，
+Agenest 负责它外面的仪表盘和通道**——Agenest 不替代 Pi，也不自己实现一个 agent。
 
 接入新的 coding agent 只需要一个 reporter（`cpctl` 或 wrapper），不需要改核心。
 接入新的 personal agent 是在 `backend/app/agent/backends/` 放一个模块，registry 会自动发现它。
