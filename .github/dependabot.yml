@@ -4,11 +4,22 @@ updates:
     directory: /backend
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
+    # React/Vite/TypeScript majors are migrations, not dependency bumps. They are done on
+    # purpose, with the build and the rail check in front of them — not merged from a bot.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
