@@ -23,7 +23,7 @@ jobs:
       NO_PROXY: 127.0.0.1,localhost
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
