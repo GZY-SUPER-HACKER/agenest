@@ -1,0 +1,79 @@
+[Unit]
+# Agenest — a dashboard for coding-agent sessions, and a channel onto your own agent.
+Description=Agenest
+After=network-online.target
+Wants=network-online.target
+
+# The dashboard needs Tailscale's interface to exist before binding to it. If Tailscale is
+# not installed, this unit is simply inactive and the bind falls back to loopback — which
+# still works for an SSH tunnel, so the service is never blocked on a VPN.
+After=tailscaled.service
+Wants=tailscaled.service
+
+# Restart throttling. In `[Unit]`, not `[Service]`: systemd 255 rejects the old placement with
+# "Unknown key name 'StartLimitIntervalSec' in section 'Service', ignoring" — which silently
+# dropped the interval and left the limit governing 10 s instead of the 120 s intended below.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=csd
+Group=csd
+
+# Token and paths come from this file, never from the repo (spec 2.3, 9).
+EnvironmentFile=/etc/csd/csd.env
+# HOME for the agent. The `csd` account's home is `/srv/csd`, and `ProtectSystem=strict`
+# leaves only `/srv/csd/data` writable — so a Pi process that resolved `~/` from passwd
+# would fail to write `~/.pi/agent/models-store.json` on its first run and die with an
+# EROFS whose message names a path nobody configured. Pointing HOME into the writable
+# tree is the fix; it is not a preference about where the agent keeps its files.
+Environment=HOME=/srv/csd/data/agent-home
+# WorkingDirectory matters more than it looks: `python -m app.main` resolves `app` from the
+# current directory, NOT from the interpreter's location. So this must be the directory that
+# *contains* the `app/` package (i.e. the repo's `backend/`), or the service crash-loops with
+# "No module named app".
+WorkingDirectory=/srv/csd/backend
+ExecStart=/srv/csd/venv/bin/python -m app.main
+
+# Restart, but do not hammer: the agent is reporting continuously, so a boot loop would
+# turn into a retry storm against the clients. The rate limit itself lives in `[Unit]`.
+Restart=on-failure
+RestartSec=5
+
+# Hardening. The service needs to write only under these paths and read only the static dir.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+# **Off, for the agent's sake — measured, not assumed.** V8 JIT-compiles into pages that are
+# writable *and* executable, and this option refuses to create them. With it on, the `native`
+# backend cannot start at all: `systemd-run -p MemoryDenyWriteExecute=yes pi --version` dies
+# with `Fatal error ... Check failed: 12 == (*__errno_location())` (EACCES on the code-range
+# mmap), while the same command with the option off prints the version. The old `true` was
+# written when this service only read a SQLite file; it became wrong the day the service
+# started spawning an agent. Runs no untrusted native code — Pi is an npm package we install
+# ourselves, and `ProtectSystem=strict` still bounds where it can write (§21).
+MemoryDenyWriteExecute=false
+# `/srv/code` is the agent's workspace: the place it writes code in, and the only other path it
+# may touch. It is named here rather than left to `ProtectSystem=strict`'s default of "nowhere",
+# because an agent that cannot write is not the agent this deployment is for — and named *here*
+# rather than widened to `/srv` so the boundary stays a line someone chose (§23).
+ReadWritePaths=/srv/csd/data /srv/code
+
+# SQLite in WAL mode with fsync on is the durability guarantee; losing it on a crash would
+# silently drop the events that survived in the OS page cache.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=csd
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

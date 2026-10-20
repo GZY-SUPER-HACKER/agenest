@@ -1,0 +1,55 @@
+# Build
+frontend/dist/
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local state written by the CLI (`.cpctl/<slug>.id` holds a session id per project).
+.cpctl/
+
+# Local dev state from dev.sh: the SQLite database, the generated dev token, and the
+# pid/log files. Both locations matter: `backend/data/` is where dev.sh writes, and
+# `/data/` is the backend's own default (`CSD_DB_PATH` unset), so a plain `python -m
+# app.main` from the repo root pours a live database, Pi sessions and agent workspaces
+# into the tree unless it is ignored too.
+backend/data/
+/data/
+backend/data-backups/
+dev-token
+*.pid
+*.log
+
+# Secrets and runtime data. The ingest token must never reach a commit.
+.env
+*.env
+!.env.example
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Internal working notes, kept on disk but not published.
+HANDOFF*.md
+notes/
+
+# Claude Code's per-machine approvals hold absolute paths and ssh commands.
+.claude/settings.local.json
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.tmp

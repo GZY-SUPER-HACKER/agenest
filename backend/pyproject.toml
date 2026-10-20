@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agenest-backend"
+version = "0.1.0"
+description = "Agenest backend — FastAPI + SQLite + SSE"
+readme = { text = "See the repository README for setup, configuration and architecture.", content-type = "text/plain" }
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    # `nanobot` is a websocket client of a gateway's channel; `native` speaks Pi's JSONL
+    # over stdio and needs nothing extra. Both are runtime imports, so both dependencies
+    # are required: a runtime import behind an optional extra crashes on the one install
+    # that skips it.
+    "websockets>=12",
+    # `hermes` and `nanobot` speak HTTP to their agent's API server.
+    "httpx>=0.27",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+    "Topic :: System :: Monitoring",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+# The Pi extensions are loaded by path, not imported, but an sdist/wheel has to carry them.
+[tool.setuptools.package-data]
+"app.agent.pi" = ["*.ts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:app.*"]

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csd-agent"
+version = "0.1.0"
+description = "Agent-host side of Agenest: tunnel, liveness probe, harness adapters"
+readme = "README.md"
+license = { text = "MIT" }
+# Deliberately 3.10, not 3.11: it needs nothing newer, and 3.10 is still what many agent
+# hosts ship. A floor higher than the machine the tool runs on is a floor that gets worked
+# around with a vendored copy.
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.scripts]
+csd-agent = "csd_agent.cli:main"
+
+[tool.setuptools]
+packages = ["csd_agent"]

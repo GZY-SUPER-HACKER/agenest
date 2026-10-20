@@ -1,0 +1,702 @@
+/* ==========================================================================
+ * rail — host > harness > project > session
+ *
+ * Docked column on desktop, overlay drawer on a phone; which one is decided by one
+ * `data-rail` attribute and a media query, never by measuring the viewport in JS.
+ *
+ * Status on a row is a leading dot plus the preview text — never a coloured bar down the
+ * side of the row. The same rule holds one level up, on a host.
+ * ========================================================================== */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  height: 100dvh;
+  overflow: hidden;
+  transition: grid-template-columns 0.24s var(--ease);
+}
+
+.app[data-rail="collapsed"] {
+  grid-template-columns: 0 1fr;
+}
+
+.rail {
+  grid-column: 1;
+  grid-row: 1;
+  width: var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--sidebar);
+  border-right: 1px solid var(--line);
+  padding-left: var(--safe-l);
+  overflow: hidden;
+  transition: transform 0.24s var(--ease), opacity 0.16s linear;
+}
+
+.app[data-rail="collapsed"] .rail {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+}
+
+.main {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  padding-right: var(--safe-r);
+}
+
+/* --------------------------------------------------------------------------
+ * header
+ * ----------------------------------------------------------------------- */
+.rail__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  padding: 0 10px 0 16px;
+  padding-top: var(--safe-t);
+  box-sizing: content-box;
+  flex: 0 0 auto;
+}
+
+.rail__title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+
+.rail__count {
+  font-size: var(--t-meta);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.rail__spacer {
+  flex: 1 1 auto;
+}
+
+/* Round icon button, shared by the rail header and the topbar. */
+.iconbtn {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--ink-2);
+  transition: background 0.14s, color 0.14s;
+}
+
+.iconbtn:hover {
+  background: var(--raise);
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------------------------
+ * filter chips
+ * ----------------------------------------------------------------------- */
+.rail__filter {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.rail__filter::-webkit-scrollbar {
+  display: none;
+}
+
+.chip {
+  height: 30px;
+  padding: 0 13px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  font-size: var(--t-meta);
+  color: var(--ink-2);
+  white-space: nowrap;
+  transition: background 0.14s, color 0.14s;
+}
+
+.chip:hover {
+  color: var(--ink);
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.rail__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 0 12px;
+}
+
+.rail__foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 44px;
+  padding: 0 16px;
+  padding-bottom: var(--safe-b);
+  box-sizing: content-box;
+  border-top: 1px solid var(--line);
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+}
+
+.rail__empty {
+  margin: 0;
+  padding: 24px 16px;
+  font-size: var(--t-preview);
+  color: var(--ink-3);
+}
+
+/* --------------------------------------------------------------------------
+ * collapse — the one disclosure animation, shared by both rail levels
+ *
+ * `display` cannot be animated and neither can `height: auto`, so the row runs 0fr → 1fr:
+ * the grid resolves the intrinsic height for us — two sessions or twenty, nothing measured
+ * and nothing hardcoded.
+ *
+ * Asymmetric durations are legal here. A transition is built from the *after-change* style,
+ * so collapsing picks up the 200ms below and expanding picks up the 240ms on the open rule.
+ *
+ * `visibility` is not decoration. A 0-height clipped subtree is painted out but still
+ * focusable, so Tab would walk into a shut group and land on nothing. It is delayed to the
+ * end of the closing animation so the content stays on screen while the height runs down.
+ * ----------------------------------------------------------------------- */
+.collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  /* The clip belongs on the container, and the content must not stretch to the track —
+     Chrome resolves an fr track against the container's *already resolved* height, so the
+     track lands at f²·content while the container itself animates at f·content. A
+     stretched wrapper is therefore shorter than the box around it for the whole transition,
+     which renders as an empty band that opens and then shuts. Clipping here and letting the
+     content keep its natural height makes the container reveal it top-down instead. */
+  overflow: hidden;
+  visibility: hidden;
+  transition:
+    grid-template-rows 200ms var(--ease-out),
+    visibility 0s linear 200ms;
+}
+
+/* Open rows. Deliberately not scoped to ancestors: a project keeps its own rows open while
+   the harness around it animates shut, which is what stops the two heights compounding into
+   one over-fast curve. */
+.host[data-open="true"] > .collapse,
+.group[data-open="true"] > .collapse,
+.proj[data-open="true"] > .collapse {
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows 240ms var(--ease-out),
+    visibility 0s linear 200ms;
+}
+
+/* Actually visible, which additionally requires every level above to be open. Each level has
+   to appear in this selector: `visibility` lets a descendant re-declare itself visible inside
+   a hidden ancestor, so a group's own `visible` would otherwise beat the hidden state it
+   inherits and a shut host would keep its whole subtree in the tab order. That is why these
+   are written out from the root rather than as one descendant rule. */
+.host[data-open="true"] > .collapse,
+.host[data-open="true"] .group[data-open="true"] > .collapse,
+.host[data-open="true"] .group[data-open="true"] .proj[data-open="true"] > .collapse {
+  visibility: visible;
+  transition:
+    grid-template-rows 240ms var(--ease-out),
+    visibility 0s;
+}
+
+/* Full height at all times; the container decides how much of it shows. `overflow` stays
+   because it contains the project panels' vertical margins — without it they would collapse
+   out through this element and add their 8px to the animated height. */
+.collapse__in {
+  align-self: start;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 150ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+
+.host[data-open="true"] > .collapse > .collapse__in,
+.group[data-open="true"] > .collapse > .collapse__in,
+.proj[data-open="true"] > .collapse > .collapse__in {
+  opacity: 1;
+  transform: none;
+}
+
+/* --------------------------------------------------------------------------
+ * host — level 1
+ *
+ * The machine a session ran on, drawn whether or not it has anything on it. The empty case
+ * is the reason this level exists: before it, every group was derived from sessions, so a
+ * host that had just connected was indistinguishable from one that was never set up, and the
+ * difference could only be found by SSH-ing in.
+ *
+ * `data-state` carries the whole distinction, and it follows the status scale's rule that a
+ * *reported* state and an *inferred* one never look alike:
+ *
+ *   connected     solid green dot
+ *   maybe offline hollow dot — we are guessing, and the guess is marked
+ *   disconnected  solid quiet dot — reported, and it is a fact
+ *   unrecorded    no dot at all — a name that only sessions mention claims nothing
+ * ----------------------------------------------------------------------- */
+.host {
+  padding: 2px 6px;
+}
+
+.host + .host {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.host__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  transition: background 0.12s;
+}
+
+.host__head:hover {
+  background: var(--raise);
+}
+
+.host__chev {
+  flex: 0 0 auto;
+  color: var(--ink-4);
+  transition: transform 200ms var(--ease-out);
+}
+
+.host[data-open="false"] .host__chev {
+  transform: rotate(-90deg);
+}
+
+.host__head::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--quiet);
+}
+
+.host[data-state="connected"] .host__head::before {
+  background: var(--ok);
+}
+
+.host[data-state="stale"] .host__head::before {
+  background: transparent;
+  border: 1.5px solid var(--quiet);
+}
+
+.host[data-state="unrecorded"] .host__head::before {
+  display: none;
+}
+
+.host__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-title);
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Said in words as well as shown as a dot, for the same reason the status pills are: colour
+   alone is not a signal to somebody who cannot separate these two greens. */
+.host__state {
+  flex: 0 0 auto;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+
+.host[data-state="connected"] .host__state {
+  color: var(--ok);
+}
+
+.host__count {
+  flex: 0 0 auto;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A machine waiting on an access decision (design.md §24). Quieter than a status on purpose:
+   it is the user's undone errand, not the machine's condition, and it must not read as one of
+   the connection states next to it — hence the dashed capsule (the same treatment
+   `possibly_stale` gets) rather than a solid marker. */
+.host__ssh {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-pill);
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+
+.host__none {
+  margin: 2px 0 4px 14px;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+}
+
+/* The harnesses are children of the host, so they take their hierarchy from the indent
+   rather than from their own outer padding — otherwise the two levels double up. */
+.host .group {
+  padding: 0 0 2px 14px;
+}
+
+.host .group + .group {
+  margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------------
+ * harness group — level 2
+ * ----------------------------------------------------------------------- */
+.group {
+  padding: 0 8px 2px;
+}
+
+.group + .group {
+  margin-top: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.group__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: var(--r-ctl);
+  transition: background 0.12s;
+}
+
+.group__head:hover {
+  background: var(--raise);
+}
+
+.group__chev {
+  flex: 0 0 auto;
+  color: var(--ink-4);
+  transition: transform 200ms var(--ease-out);
+}
+
+.group[data-open="false"] .group__chev {
+  transform: rotate(-90deg);
+}
+
+/* The dot answers "is anything in here alive", so the eye can skip a collapsed group. */
+.group__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-2);
+}
+
+.group[data-busy="true"] .group__dot {
+  background: var(--ok);
+}
+
+.group__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-caption);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group[data-busy="true"] .group__name {
+  color: var(--ink);
+}
+
+.group__count {
+  flex: 0 0 auto;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The connected-and-idle line. Written out rather than left as an empty group, because an
+   empty group on its own is indistinguishable from a rendering bug. */
+.group__none {
+  margin: 2px 0 4px 14px;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+}
+
+/* --------------------------------------------------------------------------
+ * project group — level 3
+ * ----------------------------------------------------------------------- */
+.proj {
+  margin: 2px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.proj__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  transition: background 0.12s;
+}
+
+.proj__head:hover {
+  background: var(--raise);
+}
+
+.proj__chev {
+  flex: 0 0 auto;
+  color: var(--ink-4);
+  transition: transform 200ms var(--ease-out);
+}
+
+.proj[data-open="false"] .proj__chev {
+  transform: rotate(-90deg);
+}
+
+.proj__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj[data-busy="true"] .proj__name {
+  color: var(--ink-2);
+}
+
+.proj__count {
+  flex: 0 0 auto;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.proj__rows {
+  padding: 0 5px 5px;
+}
+
+/* --------------------------------------------------------------------------
+ * session row — level 3
+ * ----------------------------------------------------------------------- */
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border-radius: var(--r-ctl);
+  text-align: left;
+  transition: background 0.12s;
+}
+
+.row:hover {
+  background: var(--raise);
+}
+
+.row[aria-current="true"] {
+  background: var(--accent-soft);
+}
+
+.row__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--quiet);
+}
+
+.row[data-status="running"] .row__dot {
+  background: var(--ok);
+}
+.row[data-status="failed"] .row__dot {
+  background: var(--dead);
+}
+.row[data-status="interrupted"] .row__dot {
+  background: var(--warn);
+}
+
+/* An inferred state gets a hollow marker: "we don't know" must not look like a report. */
+.row[data-stale="true"] .row__dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--quiet);
+}
+
+/* Blocked on the user: reported, not inferred, and amber for the same reason as interrupted
+   (styles.css — the colour scale answers "how much does this need you"). After the stale rule
+   so the report wins if a row is ever both. */
+.row[data-awaiting="true"] .row__dot {
+  background: var(--warn);
+}
+
+.row__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.row__top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-title);
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[data-status="completed"] .row__title,
+.row[data-status="unknown"] .row__title {
+  color: var(--ink-2);
+}
+
+.row__age {
+  flex: 0 0 auto;
+  font-size: var(--t-caption);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.row__preview {
+  margin-top: 1px;
+  font-size: var(--t-preview);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Motion means "just reported", never decoration. */
+.row[data-fresh="true"] .row__dot {
+  animation: blip 0.5s var(--ease);
+}
+
+@keyframes blip {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 var(--accent-line);
+  }
+  45% {
+    transform: scale(1.9);
+    box-shadow: 0 0 0 4px transparent;
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * connection state
+ * ----------------------------------------------------------------------- */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conn__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+
+.conn--live {
+  color: var(--ok);
+}
+.conn--live .conn__dot {
+  background: var(--ok);
+}
+.conn--reconnecting {
+  color: var(--warn);
+}
+.conn--reconnecting .conn__dot {
+  background: var(--warn);
+  animation: blink 1s steps(2, start) infinite;
+}
+.conn--offline {
+  color: var(--dead);
+}
+.conn--offline .conn__dot {
+  background: var(--dead);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* `transition: none` rather than the global duration clamp: the clamp leaves
+     `transition-delay` alone, and the 200ms visibility delay is exactly what has to go.
+     `!important` because these have to beat the selectors above, which carry the open/closed
+     state and therefore the specificity. */
+  .collapse,
+  .collapse__in,
+  .group__chev,
+  .proj__chev {
+    transition: none !important;
+  }
+}

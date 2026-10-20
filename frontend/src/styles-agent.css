@@ -1,0 +1,1351 @@
+/*
+ * agenest: the agent conversation, and the settings sheet over it.
+ *
+ * Distilled from Telegram iOS. What that means in CSS terms, and why each piece is here:
+ *
+ * - **Bubbles, not chat rows.** A message is a rounded block on a surface; the sender is
+ *   carried by which side it sits on and by fill, not by a name label. A name above every
+ *   bubble is a web-chat tell, and it costs a line per message for information the position
+ *   already gives you.
+ * - **Grouping.** Consecutive messages from one side tighten up and lose the corner between
+ *   them, so a burst reads as one utterance. That is the single detail that most makes a
+ *   transcript look native rather than assembled.
+ * - **The composer is a pill that grows.** One control, no toolbar, send button inside it.
+ * - **The header is thin and its subtitle is live.** "typing…" is doing real work: it is the
+ *   only thing on screen during the gap between sending and the first token.
+ *
+ * Deliberately absent: delivery ticks, read receipts, avatars. Each means something specific
+ * about a human on the other end; inventing them for an agent would be the same category of
+ * lie as inferring a session status (docs/design.md §2).
+ *
+ * No new colour tokens. Everything resolves through styles.css, so this page and the
+ * dashboard cannot drift into two different-looking products.
+ */
+
+/* The pane is the flex container; the page fills it. `min-height: 0` is the load-bearing
+   part: a flex item's default `min-height: auto` refuses to shrink below its content, so
+   without it the transcript below cannot scroll — it just grows, pushing the composer off
+   the bottom of the screen (which is exactly what it did: 1296px of chat inside a 726px
+   pane). Every ancestor of a scrollable flex child needs this, hence it being set here and
+   on `.agent` both. */
+.pane--agent {
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pane--agent > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------------------
+ * the tab bar
+ *
+ * It lives in this file because it exists only to switch between the two pages, and the
+ * second page is this one. Bottom-anchored: on a phone the top of the screen is the hardest
+ * place to reach one-handed, and the browser chrome already occupies it. It stays at the
+ * bottom on desktop too — a bar that moves with the viewport is two navigation models to
+ * learn.
+ * ----------------------------------------------------------------------- */
+.tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 8px calc(6px + var(--safe-b));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+.tabbar__tab {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 5px 4px;
+  border-radius: var(--r-ctl);
+  color: var(--ink-3);
+  transition: background 0.14s, color 0.14s;
+}
+
+.tabbar__tab:hover {
+  background: var(--raise);
+}
+
+/* Selected is carried by colour *and* weight, never by colour alone. */
+.tabbar__tab[data-active="true"] {
+  color: var(--accent);
+}
+
+.tabbar__label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.tabbar__tab[data-active="true"] .tabbar__label {
+  font-weight: 600;
+}
+
+.tabbar__icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+/* A run in flight while you are looking at the other tab. A dot rather than a count or a
+   badge: the only fact this can honestly convey from here is "something is happening", and
+   the agent page is one tap away for the rest. */
+.tabbar__dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+/* --------------------------------------------------------------------------
+ * header
+ * ----------------------------------------------------------------------- */
+.tghead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  height: 52px;
+  box-sizing: content-box;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Top safe-area is handled by the app's own topbar, which sits above this pane. Reserving it
+   again here pushed the header down and left a gap. */
+
+/* The header's controls, in the app's neutral icon colour rather than the accent.
+   `--accent` is one value shared by both themes, so a blue glyph here is the one thing on the
+   page that does not answer to `data-theme` — and the accent is reserved for the single
+   interactive thing per screen. `--ink-2` is `light-dark()`, so this follows the theme, and it
+   matches every other icon button in the app (`.iconbtn`). */
+.tghead__side {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: var(--ink-2);
+  transition: background 0.14s, color 0.14s;
+}
+
+.tghead__side:hover {
+  background: var(--raise);
+  color: var(--ink);
+}
+
+.tghead__who {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.25;
+}
+
+.tghead__name {
+  font-size: var(--t-title);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+
+.tghead__sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The liveness dot in the subtitle. Green means alive — the same meaning it has on every
+   other screen, which is why it is not given a colour of its own here. */
+.tghead__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--quiet);
+}
+
+.tghead__dot[data-state="working"] {
+  background: var(--ok);
+  animation: tg-pulse 1.4s ease-in-out infinite;
+}
+
+.tghead__dot[data-state="down"] {
+  background: var(--warn);
+}
+
+@keyframes tg-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tghead__dot[data-state="working"] {
+    animation: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * markdown inside an agent bubble
+ *
+ * Prose that arrives as Markdown has to *look* like prose, not like a wall of text with
+ * stray asterisks. The spec's list: paragraph spacing, real bullets, code on its own surface,
+ * readable line height, nothing lurid.
+ * ----------------------------------------------------------------------- */
+.md > *:first-child {
+  margin-top: 0;
+}
+
+.md > *:last-child {
+  margin-bottom: 0;
+}
+
+.md__p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* Headings inside a message are set in the body size, not scaled up. A reply is prose inside
+   a bubble; a 24px heading in there would shout across the conversation. Weight and colour
+   carry the hierarchy instead. */
+.md__h {
+  margin: 12px 0 6px;
+  font-size: var(--base);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.md__h[data-level="1"] {
+  font-size: 1.06em;
+}
+
+.md__ul,
+.md__ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.md__ul {
+  list-style: disc;
+}
+
+.md__ol {
+  list-style: decimal;
+}
+
+.md__ul li,
+.md__ol li {
+  margin-bottom: 3px;
+  line-height: 1.55;
+}
+
+.md__ul li::marker,
+.md__ol li::marker {
+  color: var(--ink-3);
+}
+
+/* Inline code: a surface of its own, no border, so it does not read as a button. */
+.md__code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.09));
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+/* A fenced block scrolls sideways rather than wrapping: wrapped code is misread code, and
+   the indentation is usually the part that matters. */
+.md__pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: light-dark(rgba(0, 0, 0, 0.055), rgba(255, 255, 255, 0.07));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.md__pre code {
+  font-family: var(--mono);
+  font-size: var(--t-caption);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.md__strong {
+  font-weight: 650;
+}
+
+.md__em {
+  font-style: italic;
+}
+
+.md__link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-line);
+  word-break: break-all;
+}
+
+.md__quote {
+  margin: 0 0 8px;
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--line-2);
+  color: var(--ink-2);
+}
+
+.md__hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+/* --------------------------------------------------------------------------
+ * transcript
+ * ----------------------------------------------------------------------- */
+/* Telegram's chat background is a texture, not a flat fill. Reproduced with two very low
+   contrast radial washes rather than an image: it keeps the surface from reading as a
+   spreadsheet and costs no request. Deliberately at the edge of visibility — the bubbles are
+   the content, and a pattern you notice is a pattern that is too loud. */
+.tgchat {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(circle at 12% 8%, var(--raise) 0%, transparent 42%),
+    radial-gradient(circle at 88% 92%, var(--raise) 0%, transparent 38%);
+  background-attachment: local;
+}
+
+.tgchat__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 10px 10px 16px;
+}
+
+/* Separator: the date the conversation moved to, or the time it resumed after a pause.
+   Where Telegram draws a solid pill, this is a hairline and quiet text: a pill is a surface,
+   and a surface above a message reads as part of the conversation, which a separator is not.
+   Centred, so it belongs to neither side, and tabular figures so a column of times does not
+   wobble as it scrolls. */
+.tgsep {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 16px 0 10px;
+  color: var(--ink-4);
+  font-size: var(--t-caption);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* Only as long as the text needs: the lines frame the label rather than divide the width. */
+.tgsep::before,
+.tgsep::after {
+  content: "";
+  flex: 0 1 34px;
+  height: 1px;
+  background: var(--line);
+}
+
+/* The first separator sits at the top of the transcript, where the pane's padding already
+   provides the room. */
+.tgchat__inner > .tgsep:first-child {
+  margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------------
+ * bubbles
+ *
+ * Palette per the chat-UI spec: the user speaks in a dark bubble with light text, the agent
+ * answers in a light grey one. That inversion is doing real work — your own words are the
+ * anchor you scan for, and giving them the heavier weight makes the transcript navigable
+ * without reading it. It is also what both reference apps do.
+ * ----------------------------------------------------------------------- */
+.bubble {
+  position: relative;
+  max-width: 78%;
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: var(--base);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.bubble__text {
+  display: block;
+  white-space: pre-wrap;
+}
+
+/* No clock on the bubble. Time is a property of the moment a message belongs to, not of the
+   message — saying it once, above the first message of that moment, is the whole rule the
+   spec asks for. A time under each bubble was the single biggest source of visual noise here,
+   and a time on hover left touch devices — the primary case — with none at all. */
+
+/* --- outgoing (you): dark bubble, light text --- */
+/* --- outgoing (you): one step heavier than the agent's grey ---
+   Light used to be near-black with white text, which made the user's own message the loudest
+   thing on the page — and on a long prompt that is a large dark slab competing with the reply
+   it asked for. It is now the same grey family as the agent's bubble, one step down, so the
+   two read as one conversation and only the side (and the corner) says who is speaking.
+   Dark keeps its lighter-than-the-agent fill: "toward the foreground" is the same relationship
+   in both themes, and it happens to point up in one and down in the other. */
+.bubble--out {
+  align-self: flex-end;
+  background: light-dark(#e4e6ea, #3a3a3e);
+  color: light-dark(#1d1d1f, #f5f5f7);
+  border: 1px solid transparent;
+  border-bottom-right-radius: 14px;
+}
+
+/* --- incoming (the agent): light grey bubble, dark text --- */
+.bubble--in {
+  align-self: flex-start;
+  background: light-dark(#f0f0f0, #1c1c1f);
+  color: light-dark(#303030, #e8e8ea);
+  border: 1px solid transparent;
+  border-bottom-left-radius: 14px;
+}
+
+/* Spacing, not grouping. A same-side run used to pull together with a shared square corner so
+   a burst read as one utterance. The agent does not speak that way any more: a checkpoint and
+   the answer it introduces are separate statements, and gluing them made the pair read as one
+   block. Every bubble keeps its full rounded shape and gets a real gap; a speaker change gets
+   a slightly larger one, which is the only grouping signal left. */
+.bubble + .bubble {
+  margin-top: 8px;
+}
+
+.bubble--out + .bubble--in,
+.bubble--in + .bubble--out {
+  margin-top: 12px;
+}
+
+/* --- hover affordances ---
+   The spec asks for copy/retry on hover rather than permanent icons. Only a subtle lift is
+   implemented: a retry would need to re-send through the agent, and a copy button that
+   silently fails on an insecure origin is worse than none. */
+@media (hover: hover) {
+  .bubble--out:hover,
+  .bubble--in:hover {
+    filter: brightness(0.985);
+  }
+}
+
+.bubble--typing {
+  padding: 12px 14px;
+}
+
+/* The three-dot "typing" indicator. Used for its literal meaning here — the agent is
+   generating — which is the one case where the metaphor is not a lie. */
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  animation: tg-typing 1.2s ease-in-out infinite;
+}
+
+.typing i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes tg-typing {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing i {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* --- tool calls ---
+   A disclosure, full width, collapsed by default. It is an event rather than something
+   anyone said, so it does not take a side and does not group with anything. */
+
+/* There is no checkpoint style any more: `message.progress` is drawn as an ordinary incoming
+   bubble. A stage-line of its own was a display only the agents whose protocol carries
+   checkpoints can fill, and an agent that streams one undivided blob made the page look like it
+   went silent through its whole run. One bubble shape for all agent prose; the tool rows are
+   what still say work is happening (docs/design.md §23). */
+.bubble--tool {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  padding-right: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  font-size: var(--t-caption);
+  overflow: hidden;
+}
+
+.bubble--tool[data-error="true"] {
+  border-color: var(--dead);
+}
+
+/* A tool still running. Dashed edge and the word "running", never a spinner alone: the same
+   rule as everywhere else in this app — the state is written, not merely coloured. */
+.bubble--tool[data-live="true"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border-style: dashed;
+  color: var(--ink-2);
+}
+
+.bubble__tool-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.bubble__tool-head::-webkit-details-marker {
+  display: none;
+}
+
+.bubble__tool-name {
+  font-family: var(--mono);
+}
+
+/* The command, next to the tool it ran. It takes the space left over and truncates rather than
+   pushing the ok/failed mark off the row: the mark is the outcome and has to stay visible, while
+   a long command is still useful cut short. `min-width: 0` is what lets a flex child shrink at
+   all — without it the text refuses to and overflows the bubble. */
+.bubble__tool-arg {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-4);
+}
+
+.bubble__tool-err {
+  color: var(--dead);
+  font-family: var(--sans);
+}
+
+.bubble__tool-state {
+  margin-left: auto;
+  color: var(--ink-4);
+}
+
+.bubble__tool-out {
+  margin: 0;
+  padding: 9px 11px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------
+ * empty state
+ * ----------------------------------------------------------------------- */
+.tgempty {
+  max-width: 400px;
+  margin: 16vh auto 0;
+  padding: 0 24px;
+  text-align: center;
+}
+
+.tgempty__title {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.tgempty__body {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--t-preview);
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+ * composer
+ * ----------------------------------------------------------------------- */
+/* The tab bar below already carries the bottom safe-area inset, so this pane must not add it
+   again — doing so produced a band of empty space between the composer and the tabs. */
+.tgcompose {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+/* One pill that grows with the text, the send button riding inside it on the right. */
+.tgcompose__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 38px;
+  max-height: 38vh;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 19px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--base);
+  line-height: 1.35;
+  resize: none;
+  field-sizing: content; /* grows with the text where supported; harmless where not */
+}
+
+.tgcompose__input::placeholder {
+  color: var(--ink-4);
+}
+
+.tgcompose__input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+.tgcompose__btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  transition: opacity 0.14s, background 0.14s, transform 0.1s;
+}
+
+.tgcompose__btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.tgcompose__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tgcompose__btn--stop {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* --------------------------------------------------------------------------
+ * settings sheet
+ * ----------------------------------------------------------------------- */
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  animation: sheet-fade 0.18s var(--ease-out);
+  cursor: default;
+}
+
+@keyframes sheet-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.sheet__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 520px;
+  max-height: 88dvh;
+  background: var(--bg);
+  border-radius: 18px 18px 0 0;
+  box-shadow: var(--drawer-shadow);
+  animation: sheet-rise 0.26s var(--ease-out);
+  overflow: hidden;
+}
+
+@keyframes sheet-rise {
+  from { transform: translateY(12%); opacity: 0.4; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet__scrim,
+  .sheet__panel {
+    animation: none;
+  }
+}
+
+.sheet__head {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 52px;
+  padding-top: var(--safe-t);
+  box-sizing: content-box;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--t-title);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.sheet__close {
+  position: absolute;
+  right: 10px;
+  top: calc(var(--safe-t) + 8px);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--ink-2);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.sheet__close:hover {
+  background: var(--raise);
+  color: var(--ink);
+}
+
+.sheet__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 14px calc(20px + var(--safe-b));
+}
+
+.sheet__group {
+  margin-bottom: 18px;
+}
+
+/* Group label, uppercase and quiet — the same treatment the dashboard gives its section
+   headings, so the two pages share a typographic hierarchy. */
+.sheet__label {
+  margin: 0 0 6px 14px;
+  font-size: var(--t-caption);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.sheet__card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  overflow: hidden;
+}
+
+.sheet__hint {
+  margin: 7px 14px 0;
+  font-size: var(--t-caption);
+  line-height: 1.45;
+  color: var(--ink-4);
+}
+
+/* A hint that is reporting a failure rather than explaining a setting. Uses the existing
+   `--dead` token, so this stays inside the "no new tokens here" rule the file opens with —
+   the point is that an error must not look like ordinary grey copy, not that it needs a
+   colour of its own. */
+.sheet__hint--bad {
+  color: var(--dead);
+}
+
+.sheet__empty {
+  margin: 0;
+  padding: 14px;
+  color: var(--ink-3);
+  font-size: var(--t-preview);
+}
+
+/* --- a settings row --- */
+.srow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 10px 14px;
+  text-align: left;
+  transition: background 0.12s;
+}
+
+.srow + .srow {
+  border-top: 1px solid var(--line);
+}
+
+.srow:hover:not(:disabled):not(.srow--static) {
+  background: var(--raise);
+}
+
+.srow:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.srow--static {
+  cursor: default;
+}
+
+.srow--danger .srow__title {
+  color: var(--dead);
+}
+
+.srow__icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.srow__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.srow__title {
+  font-size: var(--base);
+  font-weight: 500;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.srow__sub {
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.srow__mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent);
+}
+
+.srow__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--quiet);
+}
+
+.srow__dot[data-state="ok"] {
+  background: var(--ok);
+}
+
+.srow__dot[data-state="down"] {
+  background: var(--warn);
+}
+
+/* --- a row with a second action (Settings → Agent → the gear, §26) ---
+   The row keeps its whole surface as the switch action, and the gear is a separate target: two
+   buttons inside one card row. It cannot be a button inside a button, and even if it could, a
+   tap that means "switch to this agent" or "configure it" depending on a few millimetres is the
+   kind of thing people learn to avoid rather than learn to use. */
+.srow--split {
+  padding: 0;
+  gap: 0;
+}
+
+/* The row's own hover rule targets `.srow`, which is now the container: keep the highlight on
+   the part that is actually the button. */
+.srow--split:hover {
+  background: transparent;
+}
+
+.srow__tap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px;
+  text-align: left;
+  transition: background 0.12s;
+}
+
+/* The gear brings its own divider and its own tap target, so the row's text does not need the
+   full right gutter next to it. Rows without a gear keep it, or their mark would sit against
+   the edge. */
+.srow--split:has(.srow__gear) .srow__tap {
+  padding-right: 4px;
+}
+
+.srow__tap:hover:not(:disabled) {
+  background: var(--raise);
+}
+
+.srow__tap:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.srow__gear {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 46px;
+  align-self: stretch;
+  color: var(--ink-3);
+  border-left: 1px solid var(--line);
+  transition: background 0.12s, color 0.12s;
+}
+
+.srow__gear:hover {
+  background: var(--raise);
+  color: var(--ink);
+}
+
+/* Back out of a sub-page. The mirror of `.sheet__close`, and positioned the same way, so the
+   two live in the corners people already reach for. */
+.sheet__back {
+  position: absolute;
+  left: 10px;
+  top: calc(var(--safe-t) + 8px);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--ink-2);
+}
+
+.sheet__back:hover {
+  background: var(--raise);
+  color: var(--ink);
+}
+
+/* --- form fields (the local agent's configuration, §26) ---
+   A block per field rather than a `srow` with an input at the end: a phone has no room for a
+   label and a value side by side, and a label used as a placeholder disappears exactly when the
+   field has a value — which is when someone is checking what they typed. */
+.sheet__card--fields {
+  padding: 4px 0;
+}
+
+.field {
+  display: block;
+  padding: 9px 14px;
+}
+
+.field + .field {
+  border-top: 1px solid var(--line);
+}
+
+.field__label {
+  display: block;
+  font-size: var(--t-caption);
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 3px;
+}
+
+.field__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field__input {
+  display: block;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--base);
+}
+
+.field__input:focus {
+  outline: none;
+}
+
+.field__input::placeholder {
+  color: var(--ink-4);
+}
+
+/* A `<select>` is the one form control a browser still paints for you, and on Windows it
+   honours the *system* scheme rather than the page's: in dark theme the closed control came
+   out white with the page's near-white text on it, i.e. invisible. `appearance: none` takes
+   the paint back (the chevron below replaces the arrow Chromium would have drawn), and the
+   `option` rules are what the popup list reads — that list is drawn by the OS, so it needs its
+   colours stated explicitly rather than inherited. */
+.field__select {
+  position: relative;
+  display: block;
+}
+
+.field__select .field__input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 22px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.field__input option {
+  background-color: var(--surface);
+  color: var(--ink);
+}
+
+.field__select > svg {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--ink-3);
+}
+
+/* The hint under a field is not decoration: it is where the environment fallback and the
+   "leave it blank" rule are stated, so it has to be readable rather than merely present. */
+.field__hint {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-caption);
+  line-height: 1.35;
+  color: var(--ink-4);
+}
+
+/* The tool checklist, shown only for a custom allowlist. Two columns keep it from becoming a
+   long scroll for seven names. */
+.toolgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.toolgrid__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: var(--t-preview);
+  color: var(--ink);
+}
+
+.toolgrid__item input {
+  accent-color: var(--accent);
+}
+
+/* A segmented control is sized for a row; inside a field it has to fill and wrap. */
+.field .segmented {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.ncp__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ncp__btn {
+  padding: 8px 14px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: var(--t-caption);
+  font-weight: 500;
+}
+
+.ncp__btn:hover:not(:disabled) {
+  background: var(--raise);
+}
+
+.ncp__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ncp__btn--primary {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.ncp__btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.06);
+}
+
+/* --- segmented control (theme) --- */
+.segmented {
+  flex: 0 0 auto;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+}
+
+.segmented__opt {
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink-3);
+  transition: background 0.14s, color 0.14s;
+}
+
+.segmented__opt[data-active="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--card-shadow);
+}
+
+/* --- host access (Settings → Host access, design.md §24) ---
+   A row that is *static* (`srow--static`) with one small action at the end, rather than a row
+   that is itself a button: a host has two things to say — what state its access is in, and the
+   one action available — and making the whole row the button would hide the decision inside a
+   tap that also means "tell me more" everywhere else in this sheet. */
+.hostaccess__act {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--accent);
+  font-size: var(--t-caption);
+  font-weight: 500;
+}
+
+.hostaccess__act:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.hostaccess__act--danger {
+  color: var(--dead);
+}
+
+/* The public key, for the case where the host could not install it itself. Wraps rather than
+   truncates: a key you cannot copy in full is not a fallback, it is decoration. */
+.hostaccess__key {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: var(--t-caption);
+  line-height: 1.4;
+  color: var(--ink-3);
+  word-break: break-all;
+  white-space: normal;
+}
+
+
+/* --- reasoning, when the user has asked to see it ---
+   Quieter than a tool row: it is the agent thinking aloud, not something it did. Dashed and
+   muted so it cannot be mistaken for the answer, which is the failure that would actually
+   matter — a user skimming the transcript must never read reasoning as the reply. */
+.bubble--think {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-card);
+  background: transparent;
+  font-size: var(--t-caption);
+  overflow: hidden;
+}
+
+.bubble__think-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  color: var(--ink-3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.bubble__think-head::-webkit-details-marker {
+  display: none;
+}
+
+.bubble__think-label {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.bubble__think-body {
+  padding: 0 11px 10px;
+  color: var(--ink-3);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.bubble__tool-ok {
+  color: var(--ok);
+  font-size: 12px;
+}
+
+/* --- switch --- */
+.switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 44px;
+  height: 26px;
+  border-radius: var(--r-pill);
+  background: var(--line-2);
+  transition: background 0.18s var(--ease-out);
+}
+
+.switch[data-on="true"] {
+  background: var(--ok);
+}
+
+.switch__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.18s var(--ease-out);
+}
+
+.switch[data-on="true"] .switch__knob {
+  transform: translateX(18px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch__knob {
+    transition: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * desktop
+ * ----------------------------------------------------------------------- */
+@media (min-width: 761px) {
+  .tabbar {
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 8px;
+  }
+
+  .tabbar__tab {
+    flex: 0 1 160px;
+    flex-direction: row;
+    gap: 7px;
+  }
+
+  .tabbar__label {
+    font-size: var(--t-caption);
+  }
+
+  /* A sheet that fills the screen on a desktop looks like a modal, not a sheet. Constrained
+     and lifted off the bottom edge instead, which is what Telegram does on iPad. */
+  .sheet {
+    align-items: center;
+  }
+
+  .sheet__panel {
+    max-height: 78dvh;
+    border-radius: 18px;
+    margin-bottom: 0;
+  }
+
+  .bubble {
+    max-width: 62%;
+  }
+}

@@ -1,0 +1,213 @@
+/*
+ * Design tokens.
+ *
+ * Two themes, one palette. Every colour is declared once as `light-dark(light, dark)` and
+ * `color-scheme` decides which side resolves, so switching themes is a single attribute on
+ * <html> and there is no second token block to keep in sync. `color-scheme: light dark` on
+ * the root means "follow the OS" when nothing is stored; `[data-theme]` overrides it.
+ *
+ * Light is the default: white surfaces on a light grey page, hairline borders, one blue
+ * accent. Dark is black-based — true black background with surfaces lifted a few steps, not
+ * a navy console.
+ *
+ * Colour never carries meaning alone: every status that uses a colour also ships a label or
+ * an icon next to it.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* --- surfaces ------------------------------------------------------------ */
+  --bg: light-dark(#f5f5f7, #000000);        /* page */
+  --sidebar: light-dark(#fafafc, #0a0a0b);   /* rail */
+  --surface: light-dark(#ffffff, #121214);   /* cards, drawers, panels */
+  --surface-2: light-dark(#f0f1f4, #1c1c1f); /* chips, pills, inert fills */
+  --raise: light-dark(rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0.06)); /* hover */
+  --line: light-dark(#e5e7eb, #232326);
+  --line-2: light-dark(#d3d7de, #333338);
+  --scrim: light-dark(rgba(0, 0, 0, 0.32), rgba(0, 0, 0, 0.6));
+  --card-shadow: light-dark(0 1px 2px rgba(16, 24, 40, 0.04), none);
+  --drawer-shadow: light-dark(6px 0 24px rgba(16, 24, 40, 0.1), 6px 0 24px rgba(0, 0, 0, 0.5));
+
+  /* --- text: four steps, and nothing introduces a fifth --------------------- */
+  --ink: light-dark(#1d1d1f, #f5f5f7);   /* titles, numbers */
+  --ink-2: light-dark(#6e7480, #a0a0a8); /* secondary copy */
+  --ink-3: light-dark(#8a909b, #82828b); /* metadata */
+  --ink-4: light-dark(#aab0b9, #5f5f67); /* faintest: ages, disabled, glyphs */
+
+  /* --- accent --------------------------------------------------------------- */
+  --accent: #0a84ff;
+  --accent-soft: light-dark(#eaf3ff, rgba(10, 132, 255, 0.18));
+  --accent-line: light-dark(rgba(10, 132, 255, 0.3), rgba(10, 132, 255, 0.45));
+  --on-accent: #ffffff;
+
+  /* --- status --------------------------------------------------------------- */
+  /* One colour, one meaning, and the meaning is "how much does this need you":
+   *
+   *   green   — alive: running, connected, all clear
+   *   neutral — finished cleanly, or unknown. The default, deliberately unexciting.
+   *   amber   — stopped being self-sufficient: interrupted, or blocked on an answer
+   *   red     — failed
+   *   hollow  — inferred, never reported (see .row[data-stale] and .status--stale)
+   *
+   * Amber covers two states on purpose. They are the same fact from the user's side — the
+   * session will not move until someone does something — which is what this scale measures.
+   * Red stays reserved for the one that actually went wrong.
+   *
+   * `running` used to have its own blue (`--live`), which left one colour meaning two things:
+   * green was *completed* on the detail pill, while the cards and the rail already drew
+   * completed as the neutral default. The loudest colour on the page was also being spent on
+   * the state that needs you least. Green now means alive in all three places.
+   */
+  --ok: light-dark(#30a46c, #3dd68c);
+  --ok-soft: light-dark(#e9f7f0, rgba(61, 214, 140, 0.14));
+  --warn: light-dark(#d97706, #e5a03c);
+  --warn-soft: light-dark(#fdf3e5, rgba(229, 160, 60, 0.14));
+  --dead: light-dark(#e5484d, #ff5c5c);
+  --dead-soft: light-dark(#fdecec, rgba(255, 92, 92, 0.14));
+  --quiet: light-dark(#a3a8b0, #5b5b62); /* "we don't know", never a colour */
+
+  /* --- type: one base, everything else a step down -------------------------- */
+  --base: 15px;
+  --t-title: 15px;
+  --t-preview: 13px;
+  --t-meta: 13px;
+  --t-caption: 12px;
+
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* --- geometry ------------------------------------------------------------- */
+  --r-card: 12px;
+  --r-ctl: 8px;
+  --r-pill: 999px;
+  --rail-w: 280px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Disclosure motion. Same curve both ways, different durations — see `.collapse`. */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* --- safe areas ----------------------------------------------------------- */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+}
+
+/* An explicit choice beats the OS. Both live on <html> so every descendant inherits the
+   resolved side of every `light-dark()`. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* Transitions are suspended for the frame in which the palette flips.
+ *
+ * `.card` (`background, border-color`) and `.chip` (`background, color`) are the only two
+ * elements in the app that define a transition. On a theme change every other element snaps
+ * to the new palette instantly while those two animate to it over ~120ms, so the page appears
+ * to tear: cards and filter chips stuck mid-fade against a background that has already
+ * changed. Removing their transitions is not the fix — they are what makes hover and press
+ * feel responsive — so they are switched off only for the frame that does not want them.
+ *
+ * Applied by suppressColourTransitions() in lib/theme.ts, which owns the timing. */
+.theming,
+.theming *,
+.theming *::before,
+.theming *::after {
+  transition: none !important;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--base);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* `hidden` must actually hide.
+ *
+ * The UA rule is `[hidden] { display: none }`, and *any* author `display` declaration beats
+ * it regardless of specificity — the UA sheet loses to the author sheet, not to a higher
+ * selector. So `.pane--agent { display: flex }` silently un-hid a pane the app believed was
+ * hidden, and the dashboard rendered with the agent's conversation and composer stacked
+ * underneath it.
+ *
+ * Stated once, globally, rather than fixed per-element: the next component to set `display`
+ * and `hidden` together would reintroduce it, and the symptom (two views visible at once)
+ * looks like a layout bug rather than a cascade one. */
+[hidden] {
+  display: none !important;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Icons are decorative; the accessible name lives on the button. */
+svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
