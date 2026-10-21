@@ -176,6 +176,25 @@ export type ConnectionState = "connecting" | "live" | "reconnecting" | "offline"
  */
 export type AgentRole = "user" | "assistant" | "tool";
 
+/**
+ * A file carried by the conversation (docs/design.md §29).
+ *
+ * `direction` is explicit because a card can stand alone: an outgoing attachment is a message
+ * with no text, and whether it belongs on the user's side or the agent's is not something the
+ * page should infer from the bubble it happens to be near. The bytes live behind
+ * `GET /api/agent/attachments/{id}`, fetched with the access token and shown from a blob URL —
+ * never as a bare `<img src>` with `?token=`, for the same reason the agent stream uses
+ * `fetch()`.
+ */
+export interface AgentAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  direction: "in" | "out";
+  created_at: string | null;
+}
+
 export interface AgentMessage {
   /**
    * **The agent's own id for this message**, and what the page dedups on.
@@ -203,6 +222,8 @@ export interface AgentMessage {
    * (docs/design.md §23).
    */
   progress: boolean;
+  /** Files delivered with this message; `[]` is the ordinary case. */
+  attachments: AgentAttachment[];
 }
 
 export interface AgentThread {

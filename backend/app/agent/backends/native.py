@@ -27,7 +27,14 @@ from typing import Any
 
 from ...config import Settings
 from ...schemas import AgentRole, cap_string
-from ..appendix import PROGRESS_NOTES, appendix_files, appendix_text, registry_index
+from .. import attachments
+from ..appendix import (
+    PROGRESS_NOTES,
+    appendix_files,
+    appendix_text,
+    attachments_section,
+    registry_index,
+)
 from ..legacy import read_legacy_sessions
 from ..memory import write_recall_file
 from ..native_config import EMPTY as EMPTY_CONFIG
@@ -628,7 +635,17 @@ class NativeBackend(AgentBackend):
         elif not any(arg.startswith("--append-system-prompt") for arg in s.pi_args):
             # The extension is missing (a broken deployment, not a configured one), so the memory
             # and the notes ride in on the command line instead. Both are snapshots from here on.
-            appendix = appendix_text(s)
+            # The outbox is still exact: the command line is built per process, and this process
+            # is one conversation.
+            outbox = None
+            if session_id is not None:
+                try:
+                    outbox = attachments.outbox_dir(s, session_id)
+                except OSError:
+                    logger.warning(
+                        "could not prepare an outbox for %s", session_id, exc_info=True
+                    )
+            appendix = appendix_text(s, outbox=outbox)
             if appendix:
                 argv += ["--append-system-prompt", appendix]
         # Independent of the appendix on purpose: the tool answers a question the prompt has
@@ -668,7 +685,7 @@ class NativeBackend(AgentBackend):
         """
         return self._appendix_extension() is not None
 
-    def _child_env(self) -> dict[str, str]:
+    def _child_env(self, conversation_id: str | None = None) -> dict[str, str]:
         """The environment the Pi process gets.
 
         Pi reads provider credentials from its own environment, so the question is whether
@@ -721,6 +738,23 @@ class NativeBackend(AgentBackend):
             )
             if index:
                 env["CSD_AGENT_REGISTRY_NOTE"] = index
+            if conversation_id is not None:
+                # **Per conversation**, which is why this one is read here rather than in
+                # `appendix_files`: the outbox belongs to the conversation the process is
+                # serving, and a path shared by every thread would let two conversations
+                # deliver each other's files (docs/design.md §29). `check_config` starts a
+                # process that serves no conversation and leaves this unset.
+                #
+                # A directory that cannot be created omits the section rather than failing the
+                # process: the agent still answers, it just has no way to hand a file over.
+                try:
+                    outbox = attachments.outbox_dir(self._settings, conversation_id)
+                except OSError:
+                    logger.warning(
+                        "could not prepare an outbox for %s", conversation_id, exc_info=True
+                    )
+                else:
+                    env["CSD_AGENT_ATTACHMENTS_NOTE"] = attachments_section(outbox)
         if self._registry_extension() is not None:
             # What the registry tool needs to answer on its own: the interpreter this service is
             # already running under, the database, and the directory `app` resolves from. Paths
@@ -761,7 +795,7 @@ class NativeBackend(AgentBackend):
             proc = PiProcess(
                 self.build_argv(session_id=conversation_id, title="agenest"),
                 cwd=self._settings.pi_workspace,
-                env=self._child_env(),
+                env=self._child_env(conversation_id),
                 on_event=lambda frame: self._handle(conversation_id, frame),
                 command_timeout=self._settings.pi_command_timeout,
             )

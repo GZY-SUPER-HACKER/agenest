@@ -241,6 +241,9 @@ def test_every_agent_route_is_disabled_without_a_token(tmp_path: Path) -> None:
             ("post", "/api/agent/session", None),
             ("get", "/api/agent/threads/t_anything", None),
             ("post", "/api/agent/threads/t_anything/messages", {"content": "hi"}),
+            ("post", "/api/agent/threads/t_anything/attachments", None),
+            ("get", "/api/agent/attachments/a_" + "0" * 24, None),
+            ("delete", "/api/agent/attachments/a_" + "0" * 24, None),
             ("get", "/api/agent/stream", None),
         ]:
             # Bodies are valid on purpose: this asserts the *gate*, and a 422 from a malformed

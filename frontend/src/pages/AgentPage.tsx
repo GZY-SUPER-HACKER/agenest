@@ -26,6 +26,8 @@ import { createPortal } from "react-dom";
 import {
   abortAgentRun,
   agentErrorMessage,
+  deleteAgentAttachment,
+  fetchAgentAttachment,
   fetchAgentStatus,
   fetchAgentThread,
   isAgentDisabled,
@@ -33,13 +35,28 @@ import {
   openAgentStream,
   sendAgentMessage,
   switchAgentBackend,
+  uploadAgentAttachment,
 } from "../api/agent";
 import { UNAUTHORIZED, readToken, storeToken } from "../api/client";
-import { IconSend, IconSettings, IconStop, IconTerminal } from "../components/icons";
+import {
+  IconDownload,
+  IconFile,
+  IconImage,
+  IconPlus,
+  IconSend,
+  IconSettings,
+  IconStop,
+  IconTerminal,
+} from "../components/icons";
 import { SettingsSheet } from "../components/SettingsSheet";
 import { Markdown } from "../lib/markdown";
 import { type Theme } from "../lib/theme";
-import type { AgentMessage, AgentStatus, AgentStreamFrame } from "../types/api";
+import type {
+  AgentAttachment,
+  AgentMessage,
+  AgentStatus,
+  AgentStreamFrame,
+} from "../types/api";
 
 const THREAD_KEY = "csd.agent-thread";
 /** Whether to show the agent's reasoning and tool calls. Off by default (spec §5). */
@@ -80,6 +97,22 @@ function storeShowProcess(on: boolean): void {
 
 /** Above this much quiet, the transcript says when the conversation resumed. */
 const SEPARATOR_GAP_MS = 5 * 60 * 1000;
+
+/** One file chosen in the composer, waiting for the message that will carry it. */
+interface PendingFile {
+  /** Not the filename: two photos can share a name, and the list needs a stable key. */
+  key: string;
+  file: File;
+}
+
+/** The server's per-message cap (`AgentMessageCreate.attachment_ids`). */
+const MAX_ATTACHMENTS = 10;
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function sameDay(a: Date, b: Date): boolean {
   return a.toDateString() === b.toDateString();
@@ -168,6 +201,16 @@ export function AgentPage({
   const [needsToken, setNeedsToken] = useState(false);
   const [disabled, setDisabled] = useState(false);
   const [draft, setDraft] = useState("");
+  // Files chosen but not sent. Uploading starts with the send, not with the picker: a file the
+  // user removes again never reaches the server, and the composer has no orphan to clean up.
+  const [pending, setPending] = useState<PendingFile[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  // The state above drives the button; this drives the guard. A second Enter can arrive before
+  // React has re-rendered with `uploading=true`, and two sends would upload the same files twice.
+  const sending = useRef(false);
+  const imageInput = useRef<HTMLInputElement | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
   // Off by default, per spec §5. A ref as well as state because the SSE frame handler is
   // created once and must not close over a stale value.
   const [showProcess, setShowProcess] = useState(readShowProcess);
@@ -339,11 +382,65 @@ export function AgentPage({
   // forwards it to the settings sheet.
 
   // --- actions ------------------------------------------------------------
+  /** Take what the picker returned, up to the server's per-message cap. */
+  const addFiles = useCallback(
+    (files: FileList | null) => {
+      setMenuOpen(false);
+      if (!files || files.length === 0) return;
+      const chosen = Array.from(files);
+      const room = Math.max(0, MAX_ATTACHMENTS - pending.length);
+      if (chosen.length > room) {
+        setError(`A message can carry at most ${MAX_ATTACHMENTS} files.`);
+      }
+      const accepted = chosen.slice(0, room).map((file) => ({
+        // Not the filename: two photos can share a name, and two picks of the same file must
+        // still be two removable chips.
+        key: `${file.name}:${file.size}:${file.lastModified}:${Math.random()
+          .toString(36)
+          .slice(2)}`,
+        file,
+      }));
+      if (accepted.length > 0) setPending((current) => [...current, ...accepted]);
+    },
+    [pending.length],
+  );
+
+  const removePending = useCallback((key: string) => {
+    setPending((current) => current.filter((entry) => entry.key !== key));
+  }, []);
+
+  // Tapping anywhere else, or Escape, closes the little menu. A menu that stays open over the
+  // transcript is a mode, and this is one action.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const dismiss = (event: Event) => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key === "Escape") setMenuOpen(false);
+        return;
+      }
+      if (event.target instanceof Element && event.target.closest(".tgcompose")) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", dismiss);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", dismiss);
+    };
+  }, [menuOpen]);
+
   const send = useCallback(async () => {
     const content = draft.trim();
-    if (!content) return;
+    const files = pending;
+    if ((!content && files.length === 0) || sending.current) return;
+    sending.current = true;
     setDraft("");
+    setPending([]);
     setError(null);
+
+    // Uploaded but not yet named by a message. If the send then fails, these are the ids whose
+    // bytes nobody will ever point at, so they are cleaned up rather than left on disk.
+    const uploaded: string[] = [];
     try {
       // A reload can land here before `boot` resolved the session. Rather than making the
       // send button do nothing until then, ask for it now — the server returns the same
@@ -357,18 +454,43 @@ export function AgentPage({
         seen.current = new Set();
         setMessages([]);
       }
+
+      // Upload first, then send one message naming the files. The agent receives a message, not
+      // a stream of half-attached files, and a failure part-way leaves nothing to retract.
+      if (files.length > 0) setUploading(true);
+      for (const entry of files) {
+        const attachment = await uploadAgentAttachment(id, entry.file);
+        uploaded.push(attachment.id);
+      }
+      setUploading(false);
+
       setStreaming(true);
       // The server stores and publishes the user's message, but waiting for the round trip
       // through the stream would make the composer feel broken on a slow link, so the
       // returned row is rendered directly. `upsert` makes the later stream copy a no-op.
-      upsert(await sendAgentMessage(id, content));
+      upsert(await sendAgentMessage(id, content, uploaded));
     } catch (err) {
+      setUploading(false);
       setStreaming(false);
+      // The selection is not lost: a failed send puts the files back *in front of* anything
+      // chosen while it was in flight. Uploads are removed only when the server answered with
+      // an error — that request never reached the agent. A **transport** failure (`TypeError`)
+      // may have been accepted before the connection dropped, and deleting then would break a
+      // message that landed; those files stay on disk, orphaned, which costs bytes and nothing
+      // else.
+      if (files.length > 0) setPending((current) => [...files, ...current]);
+      if (!(err instanceof TypeError)) {
+        for (const attachmentId of uploaded) {
+          void deleteAgentAttachment(attachmentId).catch(() => undefined);
+        }
+      }
       if (isAgentDisabled(err)) setDisabled(true);
       else if (err instanceof Error && err.message === UNAUTHORIZED) setNeedsToken(true);
       else setError(agentErrorMessage(err));
+    } finally {
+      sending.current = false;
     }
-  }, [draft, threadId, upsert]);
+  }, [draft, pending, threadId, upsert]);
 
   const stop = useCallback(async () => {
     if (!threadId) return;
@@ -670,44 +792,133 @@ export function AgentPage({
           void send();
         }}
       >
-        <textarea
-          ref={composer}
-          className="tgcompose__input"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends on a desktop; on a phone the software keyboard's return key inserts
-            // a newline, which is what a multiline prompt wants.
-            if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          placeholder="Message"
-          rows={1}
-          aria-label={`Message ${agentName}`}
-        />
-        {busy ? (
-          <button
-            type="button"
-            className="tgcompose__btn tgcompose__btn--stop"
-            onClick={() => void stop()}
-            aria-label="Stop"
-            title="Stop"
-          >
-            <IconStop size={18} />
-          </button>
-        ) : (
-          <button
-            type="submit"
-            className="tgcompose__btn"
-            disabled={!draft.trim()}
-            aria-label="Send"
-            title="Send"
-          >
-            <IconSend size={18} />
-          </button>
+        {(pending.length > 0 || uploading) && (
+          <div className="tgcompose__pending">
+            {pending.map((entry) => (
+              <span className="filechip" key={entry.key}>
+                {entry.file.type.startsWith("image/") ? (
+                  <IconImage size={14} />
+                ) : (
+                  <IconFile size={14} />
+                )}
+                <span className="filechip__name">{entry.file.name}</span>
+                <span className="filechip__size">{formatSize(entry.file.size)}</span>
+                <button
+                  type="button"
+                  className="filechip__x"
+                  onClick={() => removePending(entry.key)}
+                  aria-label={`Remove ${entry.file.name}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {uploading && <span className="tgcompose__status">uploading…</span>}
+          </div>
         )}
+
+        <div className="tgcompose__row">
+          <div className="tgcompose__attach">
+            <button
+              type="button"
+              className="tgcompose__add"
+              onClick={() => setMenuOpen((open) => !open)}
+              aria-label="Attach a file"
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              title="Attach"
+            >
+              <IconPlus size={20} />
+            </button>
+            {menuOpen && (
+              <div className="attachmenu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="attachmenu__item"
+                  onClick={() => imageInput.current?.click()}
+                >
+                  <IconImage size={17} />
+                  <span>Photo</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="attachmenu__item"
+                  onClick={() => fileInput.current?.click()}
+                >
+                  <IconFile size={17} />
+                  <span>File</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <textarea
+            ref={composer}
+            className="tgcompose__input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends on a desktop; on a phone the software keyboard's return key inserts
+              // a newline, which is what a multiline prompt wants.
+              if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            placeholder="Message"
+            rows={1}
+            aria-label={`Message ${agentName}`}
+          />
+          {busy ? (
+            <button
+              type="button"
+              className="tgcompose__btn tgcompose__btn--stop"
+              onClick={() => void stop()}
+              aria-label="Stop"
+              title="Stop"
+            >
+              <IconStop size={18} />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="tgcompose__btn"
+              disabled={uploading || (!draft.trim() && pending.length === 0)}
+              aria-label="Send"
+              title="Send"
+            >
+              <IconSend size={18} />
+            </button>
+          )}
+        </div>
+
+        {/* Two pickers rather than one: `accept` is what makes a phone offer the camera roll
+            for a photo and the file browser for everything else. Hidden and clicked
+            programmatically by the menu, which is the only affordance the user sees. */}
+        <input
+          ref={imageInput}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(e) => {
+            addFiles(e.target.files);
+            // Reset so choosing the same file twice still fires a change event.
+            e.target.value = "";
+          }}
+        />
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            addFiles(e.target.files);
+            e.target.value = "";
+          }}
+        />
       </form>
 
       {/* Portalled into <body> rather than rendered here, because this page is `hidden`
@@ -816,19 +1027,176 @@ function Bubble({ message }: { message: AgentMessage }) {
   }
 
   const out = message.role === "user";
+  const hasText = message.content.trim().length > 0;
   return (
     <div
       className={`bubble ${out ? "bubble--out" : "bubble--in"}`}
       data-out={out}
+      data-attachment={message.attachments.length > 0 ? "true" : undefined}
     >
       {/* Only agent prose is Markdown. A user's message is shown as typed — rendering it
           would reinterpret their own words back at them, which is presumptuous and, if they
           pasted markup, wrong. */}
-      {out ? (
-        <span className="bubble__text">{message.content}</span>
-      ) : (
-        <Markdown text={message.content} />
+      {hasText &&
+        (out ? (
+          <span className="bubble__text">{message.content}</span>
+        ) : (
+          <Markdown text={message.content} />
+        ))}
+      {message.attachments.length > 0 && (
+        <div className="attachments">
+          {message.attachments.map((attachment) => (
+            <AttachmentCard key={attachment.id} attachment={attachment} />
+          ))}
+        </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * One file in the transcript (docs/design.md §29).
+ *
+ * **The bytes are fetched, not linked.** An `<img src="/api/agent/attachments/…?token=…">`
+ * would put the access token — the credential that can run commands — into browser history and
+ * every proxy log, which is the same reason the agent stream uses `fetch()`. So the card asks
+ * for its blob with a header and shows an object URL.
+ *
+ * Two actions, because "open" and "keep" are different intentions. Tapping the card hands the
+ * file to the OS through the Web Share API — on a phone that is the app chooser, which is the
+ * "open with another application" the user means. The arrow downloads it to the device. Where
+ * the share API is unavailable (most desktops), opening falls back to a download rather than a
+ * button that does nothing.
+ */
+function AttachmentCard({ attachment }: { attachment: AgentAttachment }) {
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const isImage = attachment.mime.startsWith("image/");
+
+  useEffect(() => {
+    let alive = true;
+    let created: string | null = null;
+    setBlob(null);
+    setUrl(null);
+    setLoadError(null);
+    fetchAgentAttachment(attachment.id)
+      .then((data) => {
+        if (!alive) return;
+        created = URL.createObjectURL(data);
+        setBlob(data);
+        setUrl(created);
+      })
+      .catch((err) => {
+        if (alive) setLoadError(agentErrorMessage(err));
+      });
+    return () => {
+      alive = false;
+      // Revoking here rather than on every render is what keeps a long transcript from
+      // leaking one blob per card; the effect re-runs only when the id changes.
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [attachment.id]);
+
+  const download = useCallback(() => {
+    if (!url) return;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = attachment.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }, [url, attachment.name]);
+
+  const open = useCallback(async () => {
+    if (!blob) return;
+    const file = new File([blob], attachment.name, {
+      type: blob.type || attachment.mime,
+    });
+    if (
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({ files: [file] })
+    ) {
+      try {
+        await navigator.share({ files: [file], title: attachment.name });
+        return;
+      } catch (err) {
+        // Dismissing the share sheet is a decision, not a failure. Anything else falls back to
+        // saving the file, which is still the useful half of "open it somewhere".
+        if (err instanceof DOMException && err.name === "AbortError") return;
+      }
+    }
+    download();
+  }, [blob, attachment.name, attachment.mime, download]);
+
+  const meta = (
+    <>
+      <span className="attach__name">{attachment.name}</span>
+      <span className="attach__size">{formatSize(attachment.size)}</span>
+    </>
+  );
+
+  if (isImage) {
+    return (
+      <div className="attach attach--image">
+        <button
+          type="button"
+          className="attach__image-btn"
+          onClick={() => void open()}
+          disabled={!blob}
+          aria-label={`Open ${attachment.name}`}
+        >
+          {url ? (
+            <img src={url} alt={attachment.name} />
+          ) : (
+            <span className="attach__placeholder" aria-hidden="true">
+              {loadError ? "unavailable" : ""}
+            </span>
+          )}
+        </button>
+        <div className="attach__row">
+          <span className="attach__text">{meta}</span>
+          <button
+            type="button"
+            className="attach__dl"
+            onClick={download}
+            disabled={!url}
+            aria-label={`Download ${attachment.name}`}
+            title="Download"
+          >
+            <IconDownload size={16} />
+          </button>
+        </div>
+        {loadError && <span className="attach__err">{loadError}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="attach">
+      <button
+        type="button"
+        className="attach__body"
+        onClick={() => void open()}
+        disabled={!blob}
+        aria-label={`Open ${attachment.name}`}
+      >
+        <span className="attach__icon" aria-hidden="true">
+          <IconFile size={20} />
+        </span>
+        <span className="attach__text">{meta}</span>
+      </button>
+      <button
+        type="button"
+        className="attach__dl"
+        onClick={download}
+        disabled={!url}
+        aria-label={`Download ${attachment.name}`}
+        title="Download"
+      >
+        <IconDownload size={17} />
+      </button>
+      {loadError && <span className="attach__err">{loadError}</span>}
     </div>
   );
 }

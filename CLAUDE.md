@@ -289,6 +289,7 @@ backend/app/agent/
   backends/base.py     the seam: one interface + five normalized event shapes
   backends/nanobot.py  websocket client for nanobot's channel protocol  <- the door it opens itself
   backends/native.py   a Pi process this service runs itself            <- the fallback
+  attachments.py       files both directions: inbound bytes, the outbox, and the path marker (§29)
   endpoints.py         where an agent said it can be reached, loopback only (§25)
   onboard.py           the document an agent reads to connect itself (§25)
   rpc.py               Pi's JSONL transport, driven by the native backend
@@ -442,6 +443,27 @@ Rules that are easy to break:
   continues a session it does not currently have open — every service restart. Read every file whose
   header carries the conversation's id (`_session_files_of`), ordered by filename: reading one match
   is how a live conversation went invisible while its prompt and answer sat on disk (§23).
+- **A file crosses the channel as a path, in the message text** (§29). No backend protocol has a
+  media frame and every agent has file tools, so the user's upload is stored under
+  `attachments/in/` and the agent receives one `[attachment <id>] <name>: <abs path>` line per
+  file. The id on that line is also the transcript's identity: `_to_out` resolves it against
+  `agent_attachments` and strips the line, so the page draws a card and never parses text.
+  **Only ids that resolve to this thread are stripped** — anything else is words.
+- **The agent's outbox delivers by moving, and the workspace is not a delivery.** The appendix
+  (or, for a backend without one, a one-line `[channel]` note appended to the prompt) names
+  `attachments/outbox/<conversation>/`; a settle moves whatever is there to `delivered/` and
+  records one row per file. A drain happens on `Status(streaming=False)` **and** on `history()`,
+  which repairs a restart between the turn ending and the event. Rendering files merely found in
+  the workspace would be §2's inference applied to attachments.
+- **An outgoing attachment row is the message.** The agent's transcript has no entry for a
+  filesystem handoff, so `history()` merges those rows into the conversation by `created_at`
+  (id `outbox:<attachment id>`) instead of decorating a neighbouring answer.
+- **Attachment bytes are fetched with a header, then shown from a blob URL.** `GET
+  /api/agent/attachments/{id}` is behind `access_header`; the page never uses
+  `<img src="…?token=…">`, for the same reason the agent stream is not `EventSource`. The route
+  sends `Content-Disposition: attachment` + `nosniff`, and uploads are a **raw body** with the
+  filename percent-encoded in `X-CSD-Filename`, enforced by streaming rather than by a declared
+  `Content-Length`.
 
 ### The agent page's UI
 
@@ -474,6 +496,12 @@ Distilled from Telegram iOS, and the interaction rules are load-bearing rather t
   clock and the agent still re-reads it every prompt; it just has no settings entry.
 - **Only agent prose is Markdown.** A user's message is rendered as typed; reinterpreting their
   own words back at them is presumptuous and wrong if they pasted markup.
+- **Attachments are cards, and the `+` is outside the pill.** The attach menu offers Photo
+  (image picker) and File; chosen files are chips above the input until sent, because removing
+  one must be a different tap from editing the text. A card answers name, size and what a tap
+  does; tapping it goes through the share sheet (falling back to download), and the arrow
+  downloads. Colours inherit from the bubble — a card with its own token is unreadable on one
+  side or the other (§29, design-ui.md).
 - **`src/lib/markdown.tsx` is hand-written on purpose** — no `dangerouslySetInnerHTML`, no
   dependency. It builds React elements from escaped text, so there is no path from message text
   to markup and injection is structurally impossible rather than filtered. This project has no

@@ -210,6 +210,17 @@ class Settings:
     #: The keys never travel through the API: this is the directory the *agent* reads, and the
     #: database only ever holds a path.
     agent_key_dir: Path | None = None
+    #: Where files carried by the conversation live (docs/design.md §29). `None` means an
+    #: `attachments/` directory beside the database — the same place the service already keeps
+    #: its record, so a backup of the data directory carries the files with it.
+    #:
+    #: This is not the agent's workspace. The agent is handed absolute paths into it (an
+    #: incoming file to read, an outbox to write into), which is what lets the channel carry a
+    #: file without either side pretending its protocol has a media frame.
+    attachments_dir: Path | None = None
+    #: Largest single attachment either direction, in bytes. The service writes uploads to disk
+    #: as they arrive, so this has to bound the stream rather than a parsed body.
+    attachment_max_bytes: int = 25 * 1024 * 1024
 
     @property
     def resolved_machines_file(self) -> Path | None:
@@ -238,6 +249,19 @@ class Settings:
         if self.agent_key_dir is not None:
             return self.agent_key_dir
         return Path.home() / ".ssh"
+
+    @property
+    def resolved_attachments_dir(self) -> Path:
+        """Always a path: the conversation's files have to go somewhere even on a fresh box.
+
+        Beside the database rather than inside the agent workspace, because these files are
+        the *service's* record of the conversation — a workspace can be pointed at a checkout,
+        wiped by the agent, or changed between deployments, and none of those should take the
+        transcript's attachments with them.
+        """
+        if self.attachments_dir is not None:
+            return self.attachments_dir
+        return self.db_path.parent / "attachments"
 
     @property
     def resolved_memory_dir(self) -> Path | None:
@@ -279,6 +303,7 @@ class Settings:
         memory_dir_raw = os.environ.get("CSD_MEMORY_DIR")
         machines_raw = os.environ.get("CSD_AGENT_MACHINES_FILE")
         key_dir_raw = os.environ.get("CSD_AGENT_KEY_DIR")
+        attachments_dir_raw = os.environ.get("CSD_ATTACHMENTS_DIR")
 
         return cls(
             db_path=db_path,
@@ -356,6 +381,15 @@ class Settings:
             agent_progress=_flag(os.environ.get("CSD_AGENT_PROGRESS"), default=True),
             agent_machines_file=Path(machines_raw).resolve() if machines_raw else None,
             agent_key_dir=Path(key_dir_raw).resolve() if key_dir_raw else None,
+            attachments_dir=(
+                Path(attachments_dir_raw).resolve() if attachments_dir_raw else None
+            ),
+            # MB in the environment because that is the unit a person thinks in; bytes in the
+            # dataclass because that is the unit the stream is counted in. `max(1, …)` keeps a
+            # typo from silently switching the feature off.
+            attachment_max_bytes=max(
+                1, int(float(os.environ.get("CSD_ATTACHMENT_MAX_MB", "25"))) * 1024 * 1024
+            ),
         )
 
 

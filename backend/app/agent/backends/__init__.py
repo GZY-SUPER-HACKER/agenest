@@ -17,6 +17,7 @@ from __future__ import annotations
 from ...config import Settings
 from .base import (
     AgentBackend,
+    Attachment,
     BackendError,
     BackendEvent,
     BackendStatus,
@@ -44,6 +45,7 @@ Backend = AgentBackend
 
 __all__ = [
     "AgentBackend",
+    "Attachment",
     "Backend",
     "BackendError",
     "BackendEvent",

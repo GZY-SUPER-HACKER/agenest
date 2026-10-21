@@ -27,7 +27,8 @@ from pathlib import Path
 from ..database import Database
 from ..schemas import AgentMessageOut, AgentRole, AgentThreadDetailOut, cap_string, utcnow
 from ..stream import AgentBroker, agent_frame
-from . import endpoints, native_config, store
+from . import attachments, endpoints, native_config, store
+from .appendix import attachments_channel_line
 from .backends import (
     AgentBackend,
     BackendError,
@@ -61,11 +62,12 @@ LOCAL_BACKEND = "native"
 MEMORY_BACKEND = LOCAL_BACKEND
 
 
-def _seconds_since(stamp: str | None, now: datetime) -> float | None:
-    """Seconds between an ISO timestamp from `agent_threads` and now, or `None` if unreadable.
+def _parsed_stamp(stamp: str | None) -> datetime | None:
+    """An ISO timestamp from a backend as an aware datetime, or `None` if unreadable.
 
-    Unreadable counts as "not idle": compaction is optional maintenance, and a parse failure
-    must never be the reason a conversation gets aborted for a summary.
+    Backends disagree about the offset spelling (`Z` from us, `+00:00` from Hermes' and
+    OpenClaw's own formatters), and the two do not compare correctly as strings. Parsing here is
+    what lets `history` merge a delivered file into a transcript without reordering it.
     """
     if not stamp:
         return None
@@ -76,6 +78,18 @@ def _seconds_since(stamp: str | None, now: datetime) -> float | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _seconds_since(stamp: str | None, now: datetime) -> float | None:
+    """Seconds between an ISO timestamp from `agent_threads` and now, or `None` if unreadable.
+
+    Unreadable counts as "not idle": compaction is optional maintenance, and a parse failure
+    must never be the reason a conversation gets aborted for a summary.
+    """
+    parsed = _parsed_stamp(stamp)
+    if parsed is None:
+        return None
     return (now - parsed).total_seconds()
 
 
@@ -674,7 +688,9 @@ class Supervisor:
     # ------------------------------------------------------------------ #
     # commands
     # ------------------------------------------------------------------ #
-    async def prompt(self, thread_id: str, content: str) -> AgentMessageOut:
+    async def prompt(
+        self, thread_id: str, content: str, attachment_ids: list[str] | None = None
+    ) -> AgentMessageOut:
         """Send a prompt and answer with the user's message **as the agent recorded it**.
 
         The ordering here is the whole design. Nothing is written down before the agent accepts
@@ -685,35 +701,113 @@ class Supervisor:
         prompt was accepted — so we answer with the text and no id, and the page lets the
         history provide the row instead. The alternative, minting an id here, is what would
         force the client into reconciling two ids for one message.
+
+        **Attachments travel as a path, in the text** (docs/design.md §29). Every backend's
+        agent runs on this machine with file tools and none of their protocols has a media
+        frame, so the message names the file instead of carrying it. The marker it adds is also
+        what lets a later read put the file back on this message: `_to_out` resolves the id and
+        strips the line, so the page draws a card and never parses text.
         """
         backend = self.backend_for(thread_id)
         conversation_id = await self._conversation_for(thread_id)
-        recorded = await backend.send(conversation_id, content)
 
-        message = recorded or Message(role=AgentRole.user, content=cap_string(content))
+        wanted = list(dict.fromkeys(attachment_ids or []))
+        files = attachments.get_many(self._db, thread_id, wanted, direction="in")
+        if len(files) != len(wanted):
+            # A file id that is not this thread's — or whose upload never reached a message —
+            # would otherwise be sent as a path the agent cannot read, and the page would draw
+            # a card for a file that is not there. The route turns this into a 400.
+            raise attachments.AttachmentError(
+                "an attachment does not belong to this conversation"
+            )
+
+        text = attachments.compose_prompt(content, files)
+        text = self._with_channel_note(backend, conversation_id, text)
+        recorded = await backend.send(conversation_id, text)
+
+        message = recorded or Message(role=AgentRole.user, content=text)
         out = self._to_out(thread_id, message)
         self._publish_message(thread_id, out)
 
         row = store.get_thread_row(self._db, thread_id)
         if row is not None:
             if row["title"] == "New conversation":
-                store.rename_thread(self._db, thread_id, content[:TITLE_FROM_PROMPT])
-                self._emit_status(thread_id)
+                # A photo with no caption still needs a name in the list; the first file's name
+                # is the best one available, and saying "New conversation" forever is worse.
+                title = content.strip() or (files[0]["name"] if files else "")
+                if title:
+                    store.rename_thread(self._db, thread_id, title[:TITLE_FROM_PROMPT])
+                    self._emit_status(thread_id)
             # Nothing else writes to `agent_threads`, so activity has to be recorded explicitly:
             # `updated_at` is what orders the conversation list.
             store.touch_thread(self._db, thread_id)
         return out
 
+    def _with_channel_note(self, backend: AgentBackend, conversation_id: str, text: str) -> str:
+        """Tell a backend's agent where the outbox is, when it has no per-turn appendix.
+
+        `native` gets this as a system-prompt section (`agent/appendix.py`), which is the right
+        place and costs nothing in the user's own message. A gateway agent has no such hook, so
+        the one line rides at the end of the prompt instead. It is stripped from the transcript
+        on display; it is addressed to the agent and the reader does not need it.
+        """
+        if getattr(backend, "has_per_turn_appendix", lambda: False)():
+            return text
+        try:
+            outbox = attachments.outbox_dir(self._settings, conversation_id)
+        except OSError:
+            # A directory that cannot be created costs the file-delivery half, not the message:
+            # the agent still answers, it just has nowhere to hand a file over. Failing the
+            # send instead would make an unrelated storage problem look like a broken agent.
+            logger.warning("could not prepare an outbox for %s", conversation_id, exc_info=True)
+            return text
+        return f"{text}\n\n{attachments_channel_line(outbox)}"
+
     async def history(self, thread_id: str) -> list[AgentMessageOut]:
-        """The conversation, from whichever place the backend keeps it."""
+        """The conversation, from whichever place the backend keeps it.
+
+        Two sources, merged by time. The agent's transcript holds what was said; outgoing
+        attachments are ours alone — the agent handed a file over without writing anything into
+        its transcript — so their rows *are* messages and are merged in here. A drain runs first,
+        because a file the agent left in the outbox after the settling event was missed (a
+        restart in between, a backend that does not report the end of a turn) would otherwise
+        stay invisible until the next turn happened to end.
+        """
         row = store.get_thread_row(self._db, thread_id)
         if row is None:
             raise KeyError(thread_id)
         conversation_id = row["backend_conversation_id"]
         if not conversation_id:
             return []
+        self._drain_outbox(thread_id, publish=False)
+
+        rows = attachments.list_for_thread(self._db, thread_id)
+        by_id = {entry["id"]: entry for entry in rows}
         messages = await self.backend_for(thread_id).history(conversation_id)
-        return [self._to_out(thread_id, m) for m in messages]
+        out = [
+            self._to_out(thread_id, message, attachments_by_id=by_id)
+            for message in messages
+        ]
+        delivered = self._outbox_messages(thread_id, rows)
+        if not delivered:
+            return out
+
+        # Merge by parsed time, not by string: a backend may spell its offset `+00:00` while
+        # our rows say `Z`, and those two order differently as text. If *any* backend message
+        # has no timestamp, there is nothing to place the delivery against — keep the
+        # transcript's own order and append, which is the honest fallback rather than an
+        # invention about when the file arrived.
+        keyed: list[tuple[datetime | None, AgentMessageOut]] = [
+            (_parsed_stamp(raw.created_at), rendered)
+            for raw, rendered in zip(messages, out)
+        ]
+        keyed.extend(
+            (_parsed_stamp(message.created_at), message) for message in delivered
+        )
+        if any(stamp is None for stamp, _ in keyed):
+            return out + delivered
+        keyed.sort(key=lambda pair: pair[0])
+        return [message for _, message in keyed]
 
     async def thread_detail(self, thread_id: str) -> AgentThreadDetailOut:
         """The thread's metadata joined to its conversation.
@@ -818,6 +912,10 @@ class Supervisor:
                     # awaiting here does not hold up the reader that produced the frame.
                     await self._journal_now(thread_id)
                     self._regenerate_recall(thread_id)
+                    # The turn has ended, which is the moment a file the agent left in its
+                    # outbox becomes a delivery rather than a file being written (§29). The
+                    # journal above reads the transcript and is unaffected by the move.
+                    self._drain_outbox(thread_id, publish=True)
             elif isinstance(event, Notice):
                 self._broker.publish_agent(
                     agent_frame(
@@ -835,7 +933,13 @@ class Supervisor:
     # ------------------------------------------------------------------ #
     # frames
     # ------------------------------------------------------------------ #
-    def _to_out(self, thread_id: str, message: Message) -> AgentMessageOut:
+    def _to_out(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        attachments_by_id: dict[str, object] | None = None,
+    ) -> AgentMessageOut:
         """A backend `Message` as the wire model.
 
         The only translation left in this layer, and it is a shape change rather than a policy
@@ -844,19 +948,100 @@ class Supervisor:
         live frame, where "now" *is* when the message arrived. History must not borrow it:
         stamping a re-read conversation with the moment it was read is a timestamp that is
         wrong on every refresh, which is exactly what this field was added to stop.
+
+        **The marker is resolved and removed here.** A file's id in the text is a lookup, not a
+        parse: only ids found in this thread's attachment rows are stripped, so a transcript
+        from somewhere else — or an agent quoting the line — keeps its words. `attachments_by_id`
+        is passed by `history`, which loads the table once instead of once per message.
+
+        Markers are read **only on user messages**, because that is the only place we put one.
+        An agent that quotes the line while discussing the file would otherwise have a card
+        attached to its answer and its own sentence deleted — the id resolves, but the message
+        is not the one that carried the file.
         """
+        files = list(message.attachments)
+        known = {file.id for file in files}
+        if message.role == AgentRole.user:
+            for attachment_id in attachments.marker_ids(message.content):
+                if attachment_id in known:
+                    continue
+                row = (
+                    attachments_by_id.get(attachment_id)
+                    if attachments_by_id is not None
+                    else attachments.get(self._db, attachment_id)
+                )
+                if row is None or row["thread_id"] != thread_id:
+                    continue
+                files.append(attachments.as_attachment(row))
+                known.add(attachment_id)
+
         return AgentMessageOut(
             id=message.id,
             thread_id=thread_id,
             role=message.role,
-            content=cap_string(message.content),
+            content=cap_string(attachments.strip(message.content, known)),
             tool_name=message.tool_name,
             tool_call_id=message.tool_call_id,
             args=message.args,
             is_error=message.is_error,
             created_at=message.created_at or utcnow(),
             progress=message.progress,
+            attachments=[attachments.to_out(file) for file in files],
         )
+
+    def _outbox_messages(
+        self, thread_id: str, rows: list[object]
+    ) -> list[AgentMessageOut]:
+        """One assistant message per file the agent has delivered.
+
+        An outgoing attachment is the message: the agent's transcript has no entry for it (the
+        handoff happened on the filesystem), so drawing it as a decoration on some neighbouring
+        answer would invent an association the record does not have. The id is stable across
+        the live frame and a re-read because it is the row's id.
+        """
+        messages: list[AgentMessageOut] = []
+        for row in rows:
+            if row["direction"] != "out":
+                continue
+            message = Message(
+                role=AgentRole.assistant,
+                content="",
+                id=f"outbox:{row['id']}",
+                created_at=row["created_at"],
+                attachments=[attachments.as_attachment(row)],
+            )
+            messages.append(self._to_out(thread_id, message))
+        return messages
+
+    def _drain_outbox(self, thread_id: str, *, publish: bool) -> None:
+        """Deliver whatever the agent left in this conversation's outbox.
+
+        `publish=False` is the read path (`history`), where the rows are about to be rendered
+        anyway; publishing there would send a frame back to the client that just asked for the
+        transcript. Never raises: a delivery that fails is retried by the next drain, and a
+        conversation must not stop rendering because a file could not be moved.
+        """
+        row = store.get_thread_row(self._db, thread_id)
+        if row is None or not row["backend_conversation_id"]:
+            return
+        try:
+            delivered = attachments.drain(
+                self._db, self._settings, thread_id, row["backend_conversation_id"]
+            )
+        except Exception:
+            logger.exception("could not drain the outbox for %s", thread_id)
+            return
+        if not publish:
+            return
+        for entry in delivered:
+            message = Message(
+                role=AgentRole.assistant,
+                content="",
+                id=f"outbox:{entry['id']}",
+                created_at=entry["created_at"],
+                attachments=[attachments.as_attachment(entry)],
+            )
+            self._publish_message(thread_id, self._to_out(thread_id, message))
 
     def _publish_message(self, thread_id: str, message: AgentMessageOut) -> None:
         self._broker.publish_agent(

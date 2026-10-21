@@ -14,8 +14,8 @@
  * is the agent told". This file's whole job is "read those, append them" — and, because it re-reads
  * on every prompt, an edit lands on the next message instead of on the next process.
  *
- * The order is the backend's: memory, then the machines the agent may reach, then how to report
- * while working.
+ * The order is the backend's: memory, then the machines the agent may reach, then where to
+ * leave a file for the user, then how to report while working.
  *
  * Loaded explicitly with `-e` by the native backend. Not `.pi/extensions/`, which project trust
  * gates in RPC mode; an explicit `-e` path is not gated. If this file is missing the backend falls
@@ -40,6 +40,14 @@ const PROGRESS_NOTES = process.env.CSD_AGENT_PROGRESS_NOTES ?? "";
  */
 const REGISTRY_NOTE = process.env.CSD_AGENT_REGISTRY_NOTE ?? "";
 
+/** Where to leave a file for the user (docs/design.md §29).
+ *
+ * A string rather than a path, unlike the appendix files: the path is concrete and per
+ * conversation, and the backend knows it when it spawns this process. This half only appends
+ * it — the wording lives in `agent/appendix.py`, for the same reason the other sections do.
+ */
+const ATTACHMENTS_NOTE = process.env.CSD_AGENT_ATTACHMENTS_NOTE ?? "";
+
 /** One appendix file as of right now, or "" when there is nothing to read. */
 function section(path: string): string {
   try {
@@ -59,6 +67,7 @@ export default function (pi: any) {
     const parts = [
       ...APPENDIX_PATHS.map(section),
       REGISTRY_NOTE.trim(),
+      ATTACHMENTS_NOTE.trim(),
       PROGRESS_NOTES.trim(),
     ].filter((part) => part.length > 0);
     if (parts.length === 0) return;
