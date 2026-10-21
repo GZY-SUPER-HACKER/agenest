@@ -52,3 +52,18 @@ jobs:
         run: npm run build
       - name: Rail grouping check
         run: npm run check:rail
+
+  dsh-reporter:
+    name: dsh reporter
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/dsh-csd-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Zero runtime dependencies, so there is nothing to install first.
+      - name: Test
+        run: npm test

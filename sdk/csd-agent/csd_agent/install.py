@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import access, config, host
+from . import access, config, dsh, host
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 SETTINGS = Path.home() / ".claude" / "settings.json"
@@ -153,11 +153,17 @@ exec {python} -m csd_agent hook "$@"
 
 class Installer:
     def __init__(self, cfg: config.AgentConfig, heartbeat_minutes: int = 5,
-                 token: str | None = None, pkg_source: Path | None = None) -> None:
+                 token: str | None = None, pkg_source: Path | None = None,
+                 no_dsh: bool = False, dsh_profiles: list[str] | None = None,
+                 dsh_home: str | None = None) -> None:
         self.cfg = cfg
         self.heartbeat_minutes = heartbeat_minutes
         self.token = token
         self.pkg_source = pkg_source
+        self.no_dsh = no_dsh
+        self.dsh_profiles = dsh_profiles
+        self.dsh_home = dsh_home
+        self.dsh_ok = True
         self.notes: list[str] = []
 
     # ------------------------------------------------------------------ #
@@ -170,18 +176,20 @@ class Installer:
 
     # ------------------------------------------------------------------ #
     def run(self) -> int:
-        self.step("1/6  vendoring cpctl and csd-agent")
+        self.step("1/7  vendoring cpctl and csd-agent")
         self._vendor()
-        self.step("2/6  resolving the ingest token")
+        self.step("2/7  resolving the ingest token")
         if not self._write_env():
             return 1
-        self.step("3/6  writing config and the hook wrapper")
+        self.step("3/7  writing config and the hook wrapper")
         self._write_config_and_wrapper()
-        self.step("4/6  systemd user units")
+        self.step("4/7  systemd user units")
         self._write_units()
-        self.step("5/6  Claude Code hooks")
+        self.step("5/7  Claude Code hooks")
         self._merge_hooks()
-        self.step("6/6  starting and verifying")
+        self.step("6/7  DeepSeek Harness reporter")
+        self._install_dsh()
+        self.step("7/7  starting and verifying")
         return self._verify()
 
     # ------------------------------------------------------------------ #
@@ -460,17 +468,58 @@ class Installer:
         self.note(f"hooks merged: {', '.join(added)}")
 
     # ------------------------------------------------------------------ #
+    def _install_dsh(self) -> None:
+        """Wire DSH with the same one command that wires Claude Code's hooks.
+
+        A host with no DSH is left alone — this package still works for Claude Code alone. A
+        host that *has* DSH is a host whose operator expects it on the dashboard, so a failure
+        here is reported and fails verification rather than being filed as a note.
+        """
+        if self.no_dsh:
+            self.note("skipped (--no-dsh)")
+            return
+
+        home = Path(self.dsh_home).expanduser() if self.dsh_home else dsh.dsh_home()
+        if not dsh.profiles(home):
+            self.note(f"DeepSeek Harness not found at {home}; skipped")
+            self.note("  (launch DSH once, then re-run install, if it is installed elsewhere)")
+            return
+
+        result = dsh.install(
+            profiles_requested=self.dsh_profiles,
+            pkg_source=self.pkg_source,
+            home=home,
+        )
+        for line in result.notes:
+            self.note(line)
+        self.dsh_ok = result.ok or result.skipped
+        if result.installed:
+            self.cfg.dsh_home = result.home
+            self.cfg.dsh_profiles = result.installed
+            self.cfg.save()
+        if not self.dsh_ok:
+            self.note("PROBLEM: the DSH reporter is not fully wired; see above")
+
+    # ------------------------------------------------------------------ #
     def _verify(self) -> int:
         ok = True
 
-        linger = subprocess.run(["loginctl", "show-user", _current_user(), "-p", "Linger"],
-                                capture_output=True, text=True)
-        if "Linger=yes" not in linger.stdout:
-            ok = False
-            self.note("PROBLEM: lingering is off, so these units die when you log out.")
-            self.note("         Fix with:  loginctl enable-linger $USER")
+        # Linux is the supported deployment, but the DSH reporter works on any OS and testing
+        # it on a developer machine should not require logind. Missing tools are a skipped
+        # check, not a failed install.
+        if shutil.which("loginctl"):
+            linger = subprocess.run(
+                ["loginctl", "show-user", _current_user(), "-p", "Linger"],
+                capture_output=True, text=True,
+            )
+            if "Linger=yes" not in linger.stdout:
+                ok = False
+                self.note("PROBLEM: lingering is off, so these units die when you log out.")
+                self.note("         Fix with:  loginctl enable-linger $USER")
+            else:
+                self.note("linger is on — units survive logout")
         else:
-            self.note("linger is on — units survive logout")
+            self.note("loginctl not available; skipped the linger check")
 
         if self.cfg.local:
             self.note("csd-tunnel.service: not used (--local install)")
@@ -545,6 +594,22 @@ class Installer:
                 self.note("key, and this host installs it into ~/.ssh/authorized_keys on its next")
                 self.note("heartbeat (within the timer interval).")
 
+        # DSH is additive: its reporter reports the `dsh` host row itself, so there is no
+        # second heartbeat here. What this check owns is the install the operator asked for —
+        # the package must still be mounted in every profile it was put in.
+        if not self.dsh_ok:
+            ok = False
+        if self.cfg.dsh_profiles:
+            home = Path(self.cfg.dsh_home) if self.cfg.dsh_home else dsh.dsh_home()
+            broken = [p for p in self.cfg.dsh_profiles if not dsh.profile_has_plugin(home, p)]
+            version = dsh.plugin_version(config.agent_home() / dsh.PACKAGE)
+            self.note(f"dsh reporter: {', '.join(self.cfg.dsh_profiles)} (v{version})")
+            if broken:
+                ok = False
+                self.note(f"PROBLEM: reporter missing from {', '.join(broken)}; re-run install")
+        elif not self.no_dsh:
+            self.note("dsh reporter: not present (DeepSeek Harness not installed here)")
+
         self.note("")
         where = "journalctl --user -u csd-heartbeat" if self.cfg.local else (
             "journalctl --user -u csd-tunnel"
@@ -585,6 +650,11 @@ def _is_ours(group: object) -> bool:
 
 def uninstall() -> int:
     """Stop the units, remove our hook entries, and say what was left behind."""
+    try:
+        cfg = config.AgentConfig.load()
+    except FileNotFoundError:
+        cfg = None
+
     # Before the units go down, because for a remote host the tunnel is what carries this
     # report — saying goodbye after stopping it would be talking into a closed socket. If it
     # fails anyway there is nothing to repair: the host simply stops being heard from and the
@@ -595,6 +665,20 @@ def uninstall() -> int:
     else:
         print(f"  note: could not report the disconnect ({result.detail})")
         print("        the host will read as 'maybe offline' instead, which is also true")
+
+    # DSH first, for the same reason: its host row is told goodbye over the same tunnel. A
+    # host that never had DSH is skipped, so this stays a no-op for a Claude Code install.
+    # No agent.json is still a reason to look: `csd-agent dsh install` can be used on its own.
+    dsh_home = (
+        Path(cfg.dsh_home).expanduser() if cfg and cfg.dsh_home else dsh.dsh_home()
+    )
+    if (cfg and cfg.dsh_profiles) or dsh.profiles(dsh_home):
+        print("\n== DeepSeek Harness")
+        dsh.uninstall(
+            profiles_requested=(cfg.dsh_profiles if cfg else None) or None,
+            home=dsh_home,
+            label=cfg.label if cfg else None,
+        )
 
     for unit in ("csd-heartbeat.timer", "csd-heartbeat.service", "csd-tunnel.service"):
         subprocess.run(["systemctl", "--user", "disable", "--now", unit],

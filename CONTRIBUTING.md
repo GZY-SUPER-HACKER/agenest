@@ -27,6 +27,8 @@ cd backend && .venv/bin/python -m pytest          # Linux/macOS
 
 cd frontend && npm run build
 cd frontend && npm run check:rail
+
+cd sdk/dsh-csd-plugin && npm test                 # DSH reporter; Node 20+, no dependencies
 ```
 
 The suite needs no network, no API key and no model: Pi and nanobot are stubbed inside the

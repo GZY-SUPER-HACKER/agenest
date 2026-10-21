@@ -91,6 +91,11 @@ class AgentConfig:
     ssh_host: str = ""
     ssh_user: str = ""
     ssh_port: int = 22
+    #: The DSH home and the profiles the reporter was installed into. Empty means this host
+    #: had no DeepSeek Harness at install time (or the operator passed `--no-dsh`). Recorded
+    #: rather than rediscovered so `uninstall` removes exactly what `install` added.
+    dsh_profiles: list[str] = field(default_factory=list)
+    dsh_home: str = ""
 
     @property
     def base_url(self) -> str:

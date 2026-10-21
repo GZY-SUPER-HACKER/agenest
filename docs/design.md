@@ -1651,3 +1651,65 @@ Rejected: a WebView shell. It buys background push and store distribution, neith
 scope, at the cost of a second build, signing, review, and a push path that would contradict §1
 more directly than the agent's own `ssh` already does. The worker is registered only in a
 production build: under the Vite dev server it would turn hot reload into stale HTML.
+
+## 28. DeepSeek Harness reports turns, through its own log
+
+`dsh` is a coding agent, so it follows §13's shape rather than §17's: the machine running it
+originates the connection, the dashboard only reads what it says, and nothing here makes it a
+personal agent. The reporter is a native Cordis plugin at `sdk/dsh-csd-plugin`, mounted by the
+profile's bundle patch.
+
+**Why not the shipped Claude Code hook bridge.** DSH ships `dsh-hooks-claude-code`, which runs a
+Claude Code `settings.json` hooks block, and pointing `csd-agent` at it looks like the whole
+adaptation: one config path, no new code. It supports seven events and deliberately omits
+`SessionEnd` and `Notification`. A session could be opened and never closed, and a blocked turn
+could not be shown at all. Closing it from process liveness would be §14's pid probe applied to a
+long-lived server whose process outlives every conversation — that is not a fact about the
+session. The durable log carries both facts, so the plugin reads the log rather than a lossy
+bridge.
+
+**Why a turn, and not a DSH session.** A DSH session is resumable: it stays in the store for the
+life of the process and can be reopened after a restart. There is no "ended" event to report, so a
+conversation-level row could only be `running` for as long as the server is up, or end when the
+process did. That is §2's failure in its purest form: a status nobody reported. A **turn** opens
+at `turn/start`, closes at `turn/end` with a reason DSH itself wrote (`completed`, `error`,
+`aborted`, `blocked`, `max-tokens`, `interrupted`), and maps onto the dashboard's statuses branch
+by branch. A reason this build has never seen closes as `unknown` — the vocabulary is
+merge-extensible, and treating a new value as success would turn uncertainty into a verdict.
+
+**The consequences of reading the log.** `session/disposed` mid-turn is reported as `interrupted`:
+the session leaving the store is the fact, the same shape as §14's gone process. Subagent child
+sessions are ignored because their work is the parent turn's work; a row each would make one task
+look like several. `approval/asked` and `user-questions/request` become `awaiting_user` events,
+not a status, for §16b's reason: the state must clear itself when the user answers. The turn
+heartbeat renews liveness while a turn runs, and its key includes a time bucket, because §7's
+dedupe means a constant message would apply its side effects exactly once. A plugin that mounts
+mid-turn reads the live session log once and resumes the open turn, so a live patch reload does
+not lose that turn's outcome; it uses the same events, not a second source of truth.
+
+**The host is reported; the machine is not declared driveable.** The plugin posts a host row,
+`(label, dsh)`, at boot and every five minutes, so a machine with no turns still answers "did it
+connect?". It sends `wants_access: false`: only `csd-agent` can install an approved key, and a
+declaration this connector cannot honour would be a prompt promising a shell it cannot deliver.
+It sends no goodbye on shutdown — a plugin reload or a DSH stop is not an uninstall, so the honest
+rendering is §14's silence.
+
+**Installation is the same command as Claude Code's.** A DSH-specific `dsh plugin add <checkout>`
+would make the second agent the one that needs a different manual, and pnpm records such an add
+as a `link:` to wherever the checkout happened to be — a deployment that breaks when the
+repository moves. `csd-agent install` therefore vendors the reporter under
+`~/.csd/dsh-csd-plugin`, builds an npm-style tarball, and asks DSH's own plugin manager to add
+that to every existing profile. The plugin manager is the only writer that keeps the profile's
+dependency and `dsh.profile.bundles` list consistent, so a later `dsh plugin update` reconciles
+the set instead of silently dropping the row. A host that runs DSH without Claude Code uses
+`csd-agent dsh install` (same module, no hooks); a one-shot `headless` run can still be wrapped
+by `run-agent.sh`, the shape Codex uses.
+
+Rejected: an external tail of `~/.dsh/sessions/**/session.jsonl.zstd`. It would avoid touching
+DSH, at the cost of coupling to an internal storage format and re-deriving a status outside the
+process that owns it. The session log is an implementation artifact; the documented event bus is
+the supported surface.
+
+Also rejected: reporting DSH as a personal agent. DSH's ACP and SDK surfaces would make a backend
+possible, but §17 already settled that the second tab is a channel onto the user's agent. A second
+kind of conversation there is a different product, not an adaptation of this one.

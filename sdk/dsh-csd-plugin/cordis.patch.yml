@@ -1,0 +1,9 @@
+# The reporter is one Loader row, mounted at the root so it sees every session.
+#
+# Discovery is the package manifest's `dsh.bundle.patch`, not this file's path: installing
+# the package with `dsh plugin --profile <name> add` adds it to the profile's bundle list, and
+# that is what makes this layer apply. Nothing here needs the dashboard's address or token —
+# the plugin reads those from its config, the process environment, or `~/.csd/env`.
+- insert:
+    - id: csd-reporter
+      name: dsh-csd-plugin
