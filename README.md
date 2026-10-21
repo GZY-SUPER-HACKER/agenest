@@ -59,15 +59,16 @@ process) that needs nothing but a provider key.
 
 | Layer | What works today |
 |---|---|
-| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), Codex, or anything that can call `cpctl` from a wrapper |
+| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), DeepSeek Harness / `dsh` (reporter wired by the same `csd-agent install`), Codex, or anything that can call `cpctl` from a wrapper |
 | Personal agents (the channel) | `native` — the built-in personal agent, **built on Pi** (`@earendil-works/pi-coding-agent`); nanobot; OpenClaw; Hermes Agent |
 
 The built-in `native` agent is a Pi process this service starts itself. **Pi is the agent loop;
 Agenest is the dashboard and the channel around it** — not a replacement for Pi, and not an
 agent implementation of its own.
 
-A new coding agent needs a reporter (`cpctl` or a wrapper), not a change here. A new personal
-agent is a backend module in `backend/app/agent/backends/` — the registry finds it by scan.
+A new coding agent needs a reporter (`cpctl`, a wrapper, or an agent-native plugin — `sdk/dsh-csd-plugin`
+is the DSH example), not a change here. A new personal agent is a backend module in
+`backend/app/agent/backends/` — the registry finds it by scan.
 
 ---
 
@@ -267,12 +268,14 @@ Run it **on the agent host**, not on your laptop: that is where the path starts,
 laptop's path to the cloud says nothing about the agent host's. If it has no credential yet,
 the script prints the scp-able steps to mint one that is scoped to a single port forward.
 
-### Option A: `csd-agent` (Claude Code, and the supported path)
+### Option A: `csd-agent` (Claude Code and DeepSeek Harness, and the supported path)
 
 [sdk/csd-agent](sdk/csd-agent/) owns the whole agent-host side — the tunnel, the credentials,
-the liveness probe, and the Claude Code hooks. One command on the agent host, no sudo, no pip:
+the liveness probe, the Claude Code hooks, and the DeepSeek Harness reporter. One command on
+the agent host, no sudo, no pip:
 
 ```bash
+scp -r sdk/csd-agent sdk/cpctl sdk/dsh-csd-plugin you@agent-host:~/csd-src/
 PYTHONPATH=~/csd-src/csd-agent python3 -m csd_agent install \
     --cloud <dashboard-host> --source ~/csd-src/csd-agent
 ```
@@ -282,6 +285,12 @@ makes the tunnel self-healing rather than silently half-open), merges four hook 
 `settings.json` without touching yours, enables a five-minute liveness probe, and verifies the
 result instead of assuming it. `csd-agent status` reports what it believes; `csd-agent
 uninstall` reverses it.
+
+**If DeepSeek Harness is installed on the same machine, the same command wires it too** — one
+dependency and one bundle entry per existing DSH profile, installed from a tarball under
+`~/.csd` rather than linked to this checkout. `--no-dsh` opts out; `--dsh-profile web` restricts
+it. A host that runs DSH but not Claude Code can use `csd-agent dsh install|status|uninstall`
+directly. See [its README](sdk/dsh-csd-plugin/README.md) for what it reports.
 
 **If the coding agent runs on the dashboard's own machine**, install it with `--local` instead
 of `--cloud`: there is nothing to tunnel to, so no `csd-tunnel.service` is written and the
@@ -313,6 +322,10 @@ export CSD_INGEST_TOKEN=<token>
 It opens a session, traps INT/TERM to mark the session interrupted, runs the agent untouched
 (no output captured or parsed), and closes with the agent's real exit code. It exits with the
 agent's status, never the reporter's.
+
+DSH's one-shot `headless` profile fits the same shape:
+`CSD_AGENT_TYPE=dsh ./run-agent.sh -- dsh --profile headless "run the tests"`. Its interactive
+web profile is what the `csd-agent` reporter above is for.
 
 ### Option C: a nanobot hook (in-process, no wrapper)
 

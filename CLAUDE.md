@@ -97,6 +97,11 @@ Backend deps are installed by `dev.sh` (fastapi, uvicorn[standard], pytest, http
 `backend/pyproject.toml` lists them for packaging. Test config lives there too
 (`testpaths=["tests"]`, `pythonpath=[".","tests"]`, `filterwarnings = error::DeprecationWarning`).
 
+```bash
+# DSH reporter (from sdk/dsh-csd-plugin/) — Node's built-in runner, no dependencies
+npm test
+```
+
 ### agenest (the second tab)
 
 **`native` is the default** — a Pi process this service runs itself, so the page works with
@@ -144,7 +149,9 @@ backend/tests/   organised by contract, not by module: test_contract.py, test_ss
                  test_agent_contract.py
 frontend/        React + Vite, phone-first, hash routing, hand-written CSS
 sdk/cpctl/       the reporting CLI (Python ≥3.10, zero runtime deps)
-sdk/csd-agent/   the coding-agent host side: ssh tunnel, liveness probe, Claude Code hooks
+sdk/csd-agent/   the coding-agent host side: ssh tunnel, liveness probe, Claude Code hooks,
+                 and the DSH reporter's installer (vendor → tarball → profile)
+sdk/dsh-csd-plugin/  the DeepSeek Harness side: a native Cordis plugin that reports turns (§28)
 sdk/csd_nanobot.py, sdk/agent-host-preflight.sh
 deploy/          installer, systemd unit, tailscale-prefly.sh
 ```
@@ -217,6 +224,15 @@ of your problems.
   starts declaring something else the state becomes `address_changed` and the old command is
   void. Comparing against the approved address instead would call the user's own override a
   host move.
+- **A DSH turn is a session, and `turn/end.reason` is its verdict.** A DSH conversation is
+  resumable and has no end, so a row per conversation could only ever say `running`; a turn has
+  a reported outcome. Subagent child sessions belong to the parent's turn and are not reported.
+  An unrecognized end reason closes as `unknown`, never `completed` (§28). This is the same
+  "reported, never inferred" rule as §2, applied to a second agent's log vocabulary.
+- **The DSH reporter is installed by `csd-agent install`, from a vendored tarball.** One command
+  wires both agents; `dsh plugin add <checkout>` records a `link:` to the checkout and is not a
+  deployment. `csd-agent dsh install|status|uninstall` is the same module without the Claude
+  Code half, for a DSH-only host (§28).
 
 ### The credentials, and why their defaults differ
 

@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, heartbeat, hooks, host, install
+from . import config, dsh, heartbeat, hooks, host, install
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -62,6 +62,12 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="path to the sdk/ directory holding cpctl/ and csd-agent/")
     ins.add_argument("--dry-run", action="store_true",
                      help="print what would be done, change nothing")
+    ins.add_argument("--no-dsh", action="store_true",
+                     help="do not wire DeepSeek Harness even when it is installed")
+    ins.add_argument("--dsh-profile", action="append", dest="dsh_profiles",
+                     help="DSH profile to wire (repeatable; default: every profile that exists)")
+    ins.add_argument("--dsh-home", default=None,
+                     help="DSH home (default: $DSH_HOME or ~/.dsh)")
 
     sub.add_parser("uninstall", help="stop the units and remove the hook entries")
     sub.add_parser("status", help="what this host believes, and whether it is connected")
@@ -72,6 +78,21 @@ def _build_parser() -> argparse.ArgumentParser:
     hk = sub.add_parser("hook", help="Claude Code hook entry point (reads JSON on stdin)")
     hk.add_argument("event", nargs="?", help="hook event name")
     hk.add_argument("--payload", help="payload as a string instead of on stdin (for testing)")
+
+    # DSH is wired by `install` too. This verb exists for a host that runs DSH but not Claude
+    # Code, and for re-wiring a single profile without touching anything else.
+    dsh_cmd = sub.add_parser("dsh", help="DeepSeek Harness reporter only")
+    dsh_sub = dsh_cmd.add_subparsers(dest="dsh_action", required=True)
+    dsh_ins = dsh_sub.add_parser("install", help="install the reporter into DSH profiles")
+    dsh_ins.add_argument("--profile", action="append", dest="dsh_profiles",
+                         help="profile to wire (repeatable; default: every existing profile)")
+    dsh_ins.add_argument("--source", default=None,
+                         help="path to the sdk/ directory holding dsh-csd-plugin/")
+    dsh_ins.add_argument("--home", default=None, help="DSH home (default: $DSH_HOME or ~/.dsh)")
+    dsh_status = dsh_sub.add_parser("status", help="which profiles carry the reporter")
+    dsh_status.add_argument("--home", default=None)
+    dsh_un = dsh_sub.add_parser("uninstall", help="remove the reporter from DSH profiles")
+    dsh_un.add_argument("--home", default=None)
 
     return parser
 
@@ -122,6 +143,9 @@ def _cmd_install(args: argparse.Namespace) -> int:
         heartbeat_minutes=args.heartbeat_minutes,
         token=args.token,
         pkg_source=source,
+        no_dsh=args.no_dsh,
+        dsh_profiles=args.dsh_profiles,
+        dsh_home=args.dsh_home,
     )
     return installer.run()
 
@@ -158,6 +182,15 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     values = config.read_env()
     print(f"env file   : {'present' if config.env_file().exists() else 'MISSING'}"
           f", token {'set' if values.get('CSD_INGEST_TOKEN') else 'MISSING'}")
+
+    dsh_home = Path(cfg.dsh_home).expanduser() if cfg.dsh_home else dsh.dsh_home()
+    dsh_found = dsh.profiles(dsh_home)
+    if dsh_found:
+        wired = [name for name in dsh_found if dsh.profile_has_plugin(dsh_home, name)]
+        print(f"dsh        : {dsh_home} — "
+              f"{', '.join(wired) if wired else 'no profile wired'}")
+    else:
+        print(f"dsh        : not detected at {dsh_home}")
 
     if shutil.which("systemctl"):
         units = ["csd-heartbeat.timer"] if cfg.local else [
@@ -203,6 +236,65 @@ def _alive(entry) -> bool:
     return tracked.process_alive(entry)
 
 
+def _cmd_dsh(args: argparse.Namespace) -> int:
+    """The standalone DSH path, for a host that runs no Claude Code.
+
+    `csd-agent install` calls the same module; this verb is not a second implementation. It
+    records what it wired in `agent.json` when one exists, so the ordinary `uninstall` — and
+    this verb's own `uninstall` — can reverse exactly that.
+    """
+    home = Path(args.home).expanduser() if getattr(args, "home", None) else None
+
+    if args.dsh_action == "status":
+        return dsh.status(home)
+
+    if args.dsh_action == "install":
+        source = Path(args.source).resolve() if args.source else None
+        result = dsh.install(
+            profiles_requested=args.dsh_profiles,
+            pkg_source=source,
+            home=home,
+        )
+        for line in result.notes:
+            print(f"  {line}")
+        if result.skipped:
+            return 0
+        if result.installed:
+            try:
+                cfg = config.AgentConfig.load()
+            except FileNotFoundError:
+                cfg = None
+            if cfg is not None:
+                cfg.dsh_home = result.home
+                cfg.dsh_profiles = result.installed
+                cfg.save()
+            if not config.env_file().exists():
+                print(f"  note: {config.env_file()} is missing; the reporter reads")
+                print("        CSD_BASE_URL / CSD_INGEST_TOKEN from the environment until")
+                print("        `csd-agent install` writes one.")
+        return 0 if result.ok else 1
+
+    if args.dsh_action == "uninstall":
+        try:
+            cfg = config.AgentConfig.load()
+        except FileNotFoundError:
+            cfg = None
+        # With an explicit --home, discover inside that home rather than trusting a recorded
+        # profile list that belongs to a different one (the tests do exactly this).
+        recorded = None if home is not None else (cfg.dsh_profiles if cfg else None)
+        target = home or (
+            Path(cfg.dsh_home).expanduser() if cfg and cfg.dsh_home else None
+        )
+        return dsh.uninstall(
+            profiles_requested=recorded or None,
+            home=target,
+            label=cfg.label if cfg else None,
+        )
+
+    print(f"unsupported dsh action: {args.dsh_action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -217,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         # hooks.run never raises and always returns 0, by design.
         return hooks.run(args.event, args.payload)
+    if args.command == "dsh":
+        return _cmd_dsh(args)
 
     print(f"unsupported command: {args.command}", file=sys.stderr)
     return 2

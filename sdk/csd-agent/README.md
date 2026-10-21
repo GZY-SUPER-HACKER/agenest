@@ -54,23 +54,51 @@ question, and "nothing outside your home directory" is a better answer than a li
 
 ```
 ~/.csd/                              agent.json, env (0600), cpctl/, csd-agent/, bin/, state/
+~/.csd/dsh-csd-plugin/               the DSH reporter, when DSH is installed here
+~/.csd/dsh/*.tgz                     the copy DSH's plugin manager installs from
 ~/.ssh/authorized_keys               one line, only if you approve this host in the dashboard
 ~/.config/systemd/user/              csd-tunnel.service, csd-heartbeat.{service,timer}
 ~/.claude/settings.json              four hook entries merged in; a .bak-csd-agent is taken first
+~/.dsh/profiles/*/package.json       one dependency + bundle entry, one per DSH profile
 ```
 
-No sudo, no pip, no conda environment, no package manager, nothing outside `$HOME`.
-`csd-agent uninstall` reverses all of it except the `~/.csd` directory itself, which it
-tells you to remove by hand once you are sure.
+No sudo, no pip, no conda environment, nothing outside `$HOME`. `csd-agent uninstall` reverses
+all of it except the `~/.csd` directory itself, which it tells you to remove by hand once you are
+sure.
 
 ## The four verbs
 
 | Command | What it is |
 |---|---|
-| `install` | one-time setup; vendors the code, writes the env file and the systemd units, merges the hooks, verifies |
-| `status` | what this host believes, which units are up, and whether the API actually answers |
+| `install` | one-time setup; vendors the code, writes the env file and the systemd units, merges the Claude Code hooks, wires every DSH profile, verifies |
+| `status` | what this host believes, which units are up, which DSH profiles carry the reporter, and whether the API actually answers |
 | `heartbeat` | the probe. Run by a timer every 5 minutes; also fine to run by hand |
 | `hook` | what Claude Code calls. Reads the payload on stdin; **always exits 0** |
+
+`csd-agent dsh install\|status\|uninstall` is the same DSH wiring without the Claude Code half,
+for a host that runs DeepSeek Harness but not Claude Code.
+
+## DeepSeek Harness
+
+DSH has no hook configuration file to merge; its extension surface is a Cordis plugin mounted
+from the profile's bundle list. `install` handles that without asking the operator to learn a
+second installation command:
+
+1. copy the reporter from `sdk/dsh-csd-plugin` into `~/.csd/dsh-csd-plugin`;
+2. build an npm-style tarball at `~/.csd/dsh/`;
+3. for every existing profile (`web`, `headless`, `sdk`, …), run
+   `dsh plugin --profile <name> add <tarball>`.
+
+The tarball matters. `dsh plugin add <directory>` records a `link:` to that directory, and a
+reporter linked to a development checkout stops working the day the checkout moves. A tarball
+installs as a real package; DSH's own plugin manager keeps the dependency and bundle list
+consistent, so a later `dsh plugin update` does not drop the reporter.
+
+`--no-dsh` skips it. `--dsh-profile web` limits it to one profile. A host without `~/.dsh` is
+not an error: the Claude Code install is unaffected, and re-running the installer after DSH
+appears wires it then. The reporter itself is documented in
+[dsh-csd-plugin](../dsh-csd-plugin/README.md); its host row is `(label, dsh)`, separate from
+this connector's `(label, claude_code)`, because one connector speaks for one coding agent.
 
 ## Being driven: the one line it may write outside `~/.csd`
 
