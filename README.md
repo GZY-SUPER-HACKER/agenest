@@ -59,7 +59,7 @@ process) that needs nothing but a provider key.
 
 | Layer | What works today |
 |---|---|
-| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), DeepSeek Harness / `dsh` (reporter wired by the same `csd-agent install`), Codex, or anything that can call `cpctl` from a wrapper |
+| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), DeepSeek Harness / `dsh` and standalone Pi (reporters wired by the same `csd-agent install`), Codex, or anything that can call `cpctl` from a wrapper |
 | Personal agents (the channel) | `native` — the built-in personal agent, **built on Pi** (`@earendil-works/pi-coding-agent`); nanobot; OpenClaw; Hermes Agent |
 
 The built-in `native` agent is a Pi process this service starts itself. **Pi is the agent loop;
@@ -268,14 +268,14 @@ Run it **on the agent host**, not on your laptop: that is where the path starts,
 laptop's path to the cloud says nothing about the agent host's. If it has no credential yet,
 the script prints the scp-able steps to mint one that is scoped to a single port forward.
 
-### Option A: `csd-agent` (Claude Code and DeepSeek Harness, and the supported path)
+### Option A: `csd-agent` (Claude Code, DeepSeek Harness and Pi, and the supported path)
 
 [sdk/csd-agent](sdk/csd-agent/) owns the whole agent-host side — the tunnel, the credentials,
-the liveness probe, the Claude Code hooks, and the DeepSeek Harness reporter. One command on
-the agent host, no sudo, no pip:
+the liveness probe, the Claude Code hooks, and the DeepSeek Harness and Pi reporters. One
+command on the agent host, no sudo, no pip:
 
 ```bash
-scp -r sdk/csd-agent sdk/cpctl sdk/dsh-csd-plugin you@agent-host:~/csd-src/
+scp -r sdk/csd-agent sdk/cpctl sdk/dsh-csd-plugin sdk/pi-csd-extension you@agent-host:~/csd-src/
 PYTHONPATH=~/csd-src/csd-agent python3 -m csd_agent install \
     --cloud <dashboard-host> --source ~/csd-src/csd-agent
 ```
@@ -291,6 +291,15 @@ dependency and one bundle entry per existing DSH profile, installed from a tarba
 `~/.csd` rather than linked to this checkout. `--no-dsh` opts out; `--dsh-profile web` restricts
 it. A host that runs DSH but not Claude Code can use `csd-agent dsh install|status|uninstall`
 directly. See [its README](sdk/dsh-csd-plugin/README.md) for what it reports.
+
+**Standalone `pi` is wired by the same command, as one copied file.** Pi has no plugin manager:
+it loads every `*.js` in `~/.pi/agent/extensions/` at startup, so `csd-agent install` copies
+[csd-reporter.js](sdk/pi-csd-extension/) there and `uninstall` deletes only a file carrying its
+marker. A **run** — one prompt and everything Pi does for it — is one session, and its verdict
+is Pi's own `stopReason`. `--no-pi` opts out, `--pi-home` points at another agent directory, and
+`csd-agent pi install|status|uninstall` is the Pi-only path. The Agent tab's `native` personal
+agent is the same binary and stays silent: its children carry `CSD_AGENT=1`, which the extension
+honours by registering nothing. See [its README](sdk/pi-csd-extension/README.md).
 
 **If the coding agent runs on the dashboard's own machine**, install it with `--local` instead
 of `--cloud`: there is nothing to tunnel to, so no `csd-tunnel.service` is written and the

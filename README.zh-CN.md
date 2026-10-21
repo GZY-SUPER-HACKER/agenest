@@ -55,7 +55,7 @@ Agenest 提供这样一个机会：把它和你的 personal agent 部署在一�
 
 | 层 | 支持情况 |
 |---|---|
-| Coding agent（被观察、可被驱动） | Claude Code（`sdk/csd-agent` 的 hooks）、DeepSeek Harness / `dsh`（同一条 `csd-agent install` 一并接入）、Codex，以及任何能调用 `cpctl` 的包装脚本 |
+| Coding agent（被观察、可被驱动） | Claude Code（`sdk/csd-agent` 的 hooks）、DeepSeek Harness / `dsh` 与独立的 `pi`（同一条 `csd-agent install` 一并接入）、Codex，以及任何能调用 `cpctl` 的包装脚本 |
 | Personal agent（通道） | `native`（内置，**基于 Pi 构建**，`@earendil-works/pi-coding-agent`）、nanobot、OpenClaw、Hermes Agent |
 
 `native` 不是一个自研的 agent loop，而是本服务启动的一个 Pi 进程。**Pi 负责 agent 循环，

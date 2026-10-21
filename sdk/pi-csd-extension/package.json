@@ -1,0 +1,22 @@
+{
+  "name": "pi-csd-extension",
+  "version": "0.1.0",
+  "description": "Report standalone Pi runs to a coding-session-dashboard",
+  "license": "MIT",
+  "type": "module",
+  "main": "./csd-reporter.js",
+  "exports": {
+    ".": "./csd-reporter.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "csd-reporter.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

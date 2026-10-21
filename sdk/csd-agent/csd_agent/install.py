@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import access, config, dsh, host
+from . import access, config, dsh, host, pi
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 SETTINGS = Path.home() / ".claude" / "settings.json"
@@ -155,7 +155,8 @@ class Installer:
     def __init__(self, cfg: config.AgentConfig, heartbeat_minutes: int = 5,
                  token: str | None = None, pkg_source: Path | None = None,
                  no_dsh: bool = False, dsh_profiles: list[str] | None = None,
-                 dsh_home: str | None = None) -> None:
+                 dsh_home: str | None = None, no_pi: bool = False,
+                 pi_home: str | None = None) -> None:
         self.cfg = cfg
         self.heartbeat_minutes = heartbeat_minutes
         self.token = token
@@ -164,6 +165,9 @@ class Installer:
         self.dsh_profiles = dsh_profiles
         self.dsh_home = dsh_home
         self.dsh_ok = True
+        self.no_pi = no_pi
+        self.pi_home = pi_home
+        self.pi_ok = True
         self.notes: list[str] = []
 
     # ------------------------------------------------------------------ #
@@ -176,20 +180,22 @@ class Installer:
 
     # ------------------------------------------------------------------ #
     def run(self) -> int:
-        self.step("1/7  vendoring cpctl and csd-agent")
+        self.step("1/8  vendoring cpctl and csd-agent")
         self._vendor()
-        self.step("2/7  resolving the ingest token")
+        self.step("2/8  resolving the ingest token")
         if not self._write_env():
             return 1
-        self.step("3/7  writing config and the hook wrapper")
+        self.step("3/8  writing config and the hook wrapper")
         self._write_config_and_wrapper()
-        self.step("4/7  systemd user units")
+        self.step("4/8  systemd user units")
         self._write_units()
-        self.step("5/7  Claude Code hooks")
+        self.step("5/8  Claude Code hooks")
         self._merge_hooks()
-        self.step("6/7  DeepSeek Harness reporter")
+        self.step("6/8  DeepSeek Harness reporter")
         self._install_dsh()
-        self.step("7/7  starting and verifying")
+        self.step("7/8  Pi reporter")
+        self._install_pi()
+        self.step("8/8  starting and verifying")
         return self._verify()
 
     # ------------------------------------------------------------------ #
@@ -501,6 +507,39 @@ class Installer:
             self.note("PROBLEM: the DSH reporter is not fully wired; see above")
 
     # ------------------------------------------------------------------ #
+    def _install_pi(self) -> None:
+        """Copy the Pi extension where the standalone `pi` CLI will discover it.
+
+        A host with no Pi is left alone: this package still works for Claude Code and DSH. A
+        host that *has* Pi is a host whose operator expects it on the dashboard, so a failure is
+        reported and fails verification rather than being filed as a note.
+
+        The dashboard's own personal agent (`native`) is the same binary, and the extension is
+        inert under `CSD_AGENT=1`. Installing it here is therefore not "make the Agent tab a
+        coding session" — it is what lets a human's own `pi` command show up.
+        """
+        if self.no_pi:
+            self.note("skipped (--no-pi)")
+            return
+
+        home = pi.pi_agent_dir(self.pi_home)
+        if not home.is_dir():
+            self.note(f"Pi not found at {home}; skipped")
+            self.note("  (launch Pi once, then re-run install, if it is installed elsewhere)")
+            return
+
+        result = pi.install(pkg_source=self.pkg_source, home=home)
+        for line in result.notes:
+            self.note(line)
+        self.pi_ok = result.ok or result.skipped
+        if result.installed:
+            self.cfg.pi_home = result.home
+            self.cfg.pi_extension = result.installed[0]
+            self.cfg.save()
+        if not self.pi_ok:
+            self.note("PROBLEM: the Pi reporter is not fully wired; see above")
+
+    # ------------------------------------------------------------------ #
     def _verify(self) -> int:
         ok = True
 
@@ -610,6 +649,22 @@ class Installer:
         elif not self.no_dsh:
             self.note("dsh reporter: not present (DeepSeek Harness not installed here)")
 
+        # Pi is additive in the same way: its extension reports the `pi` host row itself, so
+        # there is no second heartbeat here. What this check owns is the install the operator
+        # asked for — the file must still be where Pi looks.
+        if not self.pi_ok:
+            ok = False
+        if self.cfg.pi_home or self.cfg.pi_extension:
+            home = Path(self.cfg.pi_home).expanduser() if self.cfg.pi_home else pi.pi_agent_dir(self.pi_home)
+            installed = pi.installed_extension(home)
+            version = pi.package_version(config.agent_home() / pi.PACKAGE)
+            self.note(f"pi reporter: {installed} (v{version})")
+            if not (installed.exists() and pi.is_ours(installed)):
+                ok = False
+                self.note("PROBLEM: the Pi extension is missing; re-run install")
+        elif not self.no_pi:
+            self.note("pi reporter: not present (Pi not installed here)")
+
         self.note("")
         where = "journalctl --user -u csd-heartbeat" if self.cfg.local else (
             "journalctl --user -u csd-tunnel"
@@ -679,6 +734,19 @@ def uninstall() -> int:
             home=dsh_home,
             label=cfg.label if cfg else None,
         )
+
+    # Pi's reporter is a copy in the user's extensions directory, so there is no manifest to
+    # clean up — just our file, identified by its marker. The goodbye goes through
+    # `pi.uninstall` for the same reason DSH's does: on a remote host the tunnel is what
+    # carries it, and it is still up at this point.
+    # No agent.json is still a reason to look: `csd-agent pi install` can be used on its own.
+    pi_home = (
+        Path(cfg.pi_home).expanduser() if cfg and cfg.pi_home else pi.pi_agent_dir()
+    )
+    pi_target = pi.installed_extension(pi_home)
+    if (cfg and cfg.pi_extension) or pi_target.exists():
+        print("\n== Pi")
+        pi.uninstall(home=pi_home, label=cfg.label if cfg else None)
 
     for unit in ("csd-heartbeat.timer", "csd-heartbeat.service", "csd-tunnel.service"):
         subprocess.run(["systemctl", "--user", "disable", "--now", unit],

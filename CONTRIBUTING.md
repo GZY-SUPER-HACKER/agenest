@@ -29,6 +29,7 @@ cd frontend && npm run build
 cd frontend && npm run check:rail
 
 cd sdk/dsh-csd-plugin && npm test                 # DSH reporter; Node 20+, no dependencies
+cd sdk/pi-csd-extension && npm test               # Pi reporter; same runner, no dependencies
 ```
 
 The suite needs no network, no API key and no model: Pi and nanobot are stubbed inside the

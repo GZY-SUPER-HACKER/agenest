@@ -1713,3 +1713,64 @@ the supported surface.
 Also rejected: reporting DSH as a personal agent. DSH's ACP and SDK surfaces would make a backend
 possible, but §17 already settled that the second tab is a channel onto the user's agent. A second
 kind of conversation there is a different product, not an adaptation of this one.
+
+## 31. Pi reports runs, and the personal agent it also powers stays silent
+
+Standalone `pi` is a coding agent and follows §13's shape: the machine running it originates the
+connection, the dashboard only reads, and nothing here makes it a personal agent. The reporter is
+a single Pi extension at `sdk/pi-csd-extension/csd-reporter.js`, copied into the agent's global
+extensions directory by `csd-agent install`.
+
+**Why a run, and not a turn.** Pi's `turn_end` fires once per LLM response plus its tool calls,
+so a prompt that calls tools ends several turns and a retry ends one more. A row per turn would
+make one task look like several, and a row per Pi *session* could never close at all — the same
+problem §28 has with a DSH conversation. A **run** is what the user asked for: it opens on
+`before_agent_start` (once per prompt, carrying the prompt text) and closes on `agent_settled`
+(Pi has no retry, compaction retry or queued follow-up left). `agent_start` is not the opener: it
+fires again for retries and compaction inside one prompt. A `before_agent_start` that arrives
+while a run is open — a queued follow-up — belongs to that run, so it is ignored rather than
+opening a second row. Turns are `progress` events (`turn N complete`).
+
+**The verdict is `AssistantMessage.stopReason`.** `stop`, `toolUse` and `deferred` are
+`completed`; `length` is `completed` with a summary that names the output ceiling; `error` is
+`failed` with Pi's own `errorMessage`; `aborted` is `interrupted`. `pending`, a missing reason, or
+a value a future Pi adds is `unknown` — §2's rule applied to a second agent's vocabulary, because
+treating an unrecognized reason as success turns uncertainty into a verdict. Both `turn_end` and
+`message_end` record the reason; whichever arrives last wins, which on a retried run is the final
+answer. `session_shutdown` closes an open run as `interrupted` and is bounded to two seconds:
+Pi awaits that hook, and a dead dashboard must not hold the agent's exit.
+
+**The dashboard's own personal agent is the same binary, and must not report.** The Agent tab's
+`native` backend spawns `pi` for every conversation, and those runs are the channel, not coding
+sessions — reporting them would show the dashboard talking to itself. The backend already marks
+every child with `CSD_AGENT=1`; the extension returns without registering a single handler when it
+sees it. `CSD_PI_REPORTER=0` is the operator's equivalent opt-out. No backend change was needed,
+which is the point: the marker existed for exactly this.
+
+**One copied file, in the global directory.** Pi discovers `*.js` under the agent's `extensions/`
+at startup and has no plugin manager, so the install is a copy and uninstall is a delete —
+allowed only for a file carrying the reporter's marker, because the directory belongs to the
+user. The global directory (`~/.pi/agent/extensions`) is the only target: `.pi/extensions` is
+project-local and loads only after Pi trusts the project, so a reporter there would go silent the
+first time it ran somewhere new. A `link:` to a checkout, which is what a development install
+looks like, breaks the day the checkout moves — the same reason §28 insists on a tarball.
+
+**The host row and its silence.** The extension posts `(label, pi)` at session start and every
+five minutes, so a machine that has ever run Pi answers "did it connect?" without a turn, with
+`wants_access: false` for §24's reason: this connector cannot install an approved key, so
+declaring itself driveable would promise a shell it cannot deliver. No goodbye is sent on
+shutdown — a Pi exit or a `/new` is not an uninstall, and silence is §14's honest rendering.
+`csd-agent uninstall` says goodbye explicitly, before its units stop.
+
+**Diagnostics go to stderr.** In `pi --print` the answer is the stdout stream. A reporter that
+logged successes to stdout would inject its own lines into whatever is consuming the agent's
+output — a wrapper piping `pi -p` into a file would find them in the answer. This is the one place
+the Pi reporter differs from the DSH plugin, which logs to a server console.
+
+Rejected: **wrapping `pi` with `run-agent.sh` as the supported path.** It works, but it captures
+nothing about a run the user starts by hand, and Pi has a documented extension surface — the same
+argument §28 makes against a hook bridge.
+
+Rejected: **reporting `awaiting_user`.** Pi has no standard approval or permission event. A tool
+name is not a request for a human, and inferring one would be the one thing this dashboard
+refuses to do.
