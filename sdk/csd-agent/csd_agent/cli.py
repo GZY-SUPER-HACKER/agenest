@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, dsh, heartbeat, hooks, host, install
+from . import config, dsh, heartbeat, hooks, host, install, pi
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -68,6 +68,10 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="DSH profile to wire (repeatable; default: every profile that exists)")
     ins.add_argument("--dsh-home", default=None,
                      help="DSH home (default: $DSH_HOME or ~/.dsh)")
+    ins.add_argument("--no-pi", action="store_true",
+                     help="do not wire the standalone Pi CLI even when it is installed")
+    ins.add_argument("--pi-home", default=None,
+                     help="Pi agent directory (default: $PI_CODING_AGENT_DIR or ~/.pi/agent)")
 
     sub.add_parser("uninstall", help="stop the units and remove the hook entries")
     sub.add_parser("status", help="what this host believes, and whether it is connected")
@@ -93,6 +97,20 @@ def _build_parser() -> argparse.ArgumentParser:
     dsh_status.add_argument("--home", default=None)
     dsh_un = dsh_sub.add_parser("uninstall", help="remove the reporter from DSH profiles")
     dsh_un.add_argument("--home", default=None)
+
+    # Pi is wired by `install` too. This verb exists for a host that runs Pi but not Claude
+    # Code, and for re-copying the extension without touching anything else.
+    pi_cmd = sub.add_parser("pi", help="Pi reporter only")
+    pi_sub = pi_cmd.add_subparsers(dest="pi_action", required=True)
+    pi_ins = pi_sub.add_parser("install", help="copy the extension where Pi discovers it")
+    pi_ins.add_argument("--source", default=None,
+                        help="path to the sdk/ directory holding pi-csd-extension/")
+    pi_ins.add_argument("--home", default=None,
+                        help="Pi agent directory (default: $PI_CODING_AGENT_DIR or ~/.pi/agent)")
+    pi_status = pi_sub.add_parser("status", help="whether the extension is installed")
+    pi_status.add_argument("--home", default=None)
+    pi_un = pi_sub.add_parser("uninstall", help="remove the reporter from Pi")
+    pi_un.add_argument("--home", default=None)
 
     return parser
 
@@ -146,6 +164,8 @@ def _cmd_install(args: argparse.Namespace) -> int:
         no_dsh=args.no_dsh,
         dsh_profiles=args.dsh_profiles,
         dsh_home=args.dsh_home,
+        no_pi=args.no_pi,
+        pi_home=args.pi_home,
     )
     return installer.run()
 
@@ -191,6 +211,17 @@ def _cmd_status(_args: argparse.Namespace) -> int:
               f"{', '.join(wired) if wired else 'no profile wired'}")
     else:
         print(f"dsh        : not detected at {dsh_home}")
+
+    pi_home = Path(cfg.pi_home).expanduser() if cfg.pi_home else pi.pi_agent_dir()
+    pi_target = pi.installed_extension(pi_home)
+    if not pi_home.is_dir():
+        print(f"pi         : not detected at {pi_home}")
+    elif pi_target.exists() and pi.is_ours(pi_target):
+        print(f"pi         : {pi_target} — installed")
+    elif pi_target.exists():
+        print(f"pi         : {pi_target} — present but not ours")
+    else:
+        print(f"pi         : {pi_home} — extension not installed")
 
     if shutil.which("systemctl"):
         units = ["csd-heartbeat.timer"] if cfg.local else [
@@ -295,6 +326,54 @@ def _cmd_dsh(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_pi(args: argparse.Namespace) -> int:
+    """The standalone Pi path, for a host that runs no Claude Code.
+
+    `csd-agent install` calls the same module; this verb is not a second implementation. It
+    records what it copied in `agent.json` when one exists, so the ordinary `uninstall` — and
+    this verb's own `uninstall` — reverses exactly that.
+    """
+    home = Path(args.home).expanduser() if getattr(args, "home", None) else None
+
+    if args.pi_action == "status":
+        return pi.status(home)
+
+    if args.pi_action == "install":
+        source = Path(args.source).resolve() if args.source else None
+        result = pi.install(pkg_source=source, home=home)
+        for line in result.notes:
+            print(f"  {line}")
+        if result.skipped:
+            return 0
+        if result.installed:
+            try:
+                cfg = config.AgentConfig.load()
+            except FileNotFoundError:
+                cfg = None
+            if cfg is not None:
+                cfg.pi_home = result.home
+                cfg.pi_extension = result.installed[0]
+                cfg.save()
+            if not config.env_file().exists():
+                print(f"  note: {config.env_file()} is missing; the extension reads")
+                print("        CSD_BASE_URL / CSD_INGEST_TOKEN from the environment until")
+                print("        `csd-agent install` writes one.")
+        return 0 if result.ok else 1
+
+    if args.pi_action == "uninstall":
+        try:
+            cfg = config.AgentConfig.load()
+        except FileNotFoundError:
+            cfg = None
+        # With an explicit --home, remove inside that home rather than trusting a recorded path
+        # that belongs to a different one (the tests do exactly this).
+        target = home or (Path(cfg.pi_home).expanduser() if cfg and cfg.pi_home else None)
+        return pi.uninstall(home=target, label=cfg.label if cfg else None)
+
+    print(f"unsupported pi action: {args.pi_action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -311,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
         return hooks.run(args.event, args.payload)
     if args.command == "dsh":
         return _cmd_dsh(args)
+    if args.command == "pi":
+        return _cmd_pi(args)
 
     print(f"unsupported command: {args.command}", file=sys.stderr)
     return 2

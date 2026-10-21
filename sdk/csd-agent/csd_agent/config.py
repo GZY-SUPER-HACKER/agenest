@@ -96,6 +96,11 @@ class AgentConfig:
     #: rather than rediscovered so `uninstall` removes exactly what `install` added.
     dsh_profiles: list[str] = field(default_factory=list)
     dsh_home: str = ""
+    #: The Pi agent directory the extension was copied into, and the file it copied. Recorded
+    #: rather than rediscovered so `uninstall` removes exactly what `install` added — an agent
+    #: started with `PI_CODING_AGENT_DIR` would otherwise point uninstall somewhere else.
+    pi_home: str = ""
+    pi_extension: str = ""
 
     @property
     def base_url(self) -> str:

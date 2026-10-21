@@ -56,10 +56,12 @@ question, and "nothing outside your home directory" is a better answer than a li
 ~/.csd/                              agent.json, env (0600), cpctl/, csd-agent/, bin/, state/
 ~/.csd/dsh-csd-plugin/               the DSH reporter, when DSH is installed here
 ~/.csd/dsh/*.tgz                     the copy DSH's plugin manager installs from
+~/.csd/pi-csd-extension/             the Pi reporter, when Pi is installed here
 ~/.ssh/authorized_keys               one line, only if you approve this host in the dashboard
 ~/.config/systemd/user/              csd-tunnel.service, csd-heartbeat.{service,timer}
 ~/.claude/settings.json              four hook entries merged in; a .bak-csd-agent is taken first
 ~/.dsh/profiles/*/package.json       one dependency + bundle entry, one per DSH profile
+~/.pi/agent/extensions/csd-reporter.js  one copied file, the whole Pi install
 ```
 
 No sudo, no pip, no conda environment, nothing outside `$HOME`. `csd-agent uninstall` reverses
@@ -70,8 +72,8 @@ sure.
 
 | Command | What it is |
 |---|---|
-| `install` | one-time setup; vendors the code, writes the env file and the systemd units, merges the Claude Code hooks, wires every DSH profile, verifies |
-| `status` | what this host believes, which units are up, which DSH profiles carry the reporter, and whether the API actually answers |
+| `install` | one-time setup; vendors the code, writes the env file and the systemd units, merges the Claude Code hooks, wires every DSH profile and the Pi extension, verifies |
+| `status` | what this host believes, which units are up, which DSH profiles carry the reporter, whether the Pi extension is in place, and whether the API actually answers |
 | `heartbeat` | the probe. Run by a timer every 5 minutes; also fine to run by hand |
 | `hook` | what Claude Code calls. Reads the payload on stdin; **always exits 0** |
 
@@ -99,6 +101,39 @@ not an error: the Claude Code install is unaffected, and re-running the installe
 appears wires it then. The reporter itself is documented in
 [dsh-csd-plugin](../dsh-csd-plugin/README.md); its host row is `(label, dsh)`, separate from
 this connector's `(label, claude_code)`, because one connector speaks for one coding agent.
+
+## Pi
+
+Pi has neither a hooks file nor a plugin manager. It discovers every `*.js` in
+`$PI_CODING_AGENT_DIR` (default `~/.pi/agent`)`/extensions/` at startup, so the install is a copy
+and nothing else:
+
+1. copy `sdk/pi-csd-extension` into `~/.csd/pi-csd-extension` (the deployed artifact);
+2. copy `csd-reporter.js` to `~/.pi/agent/extensions/`.
+
+The **global** directory is the only target. `.pi/extensions/` is project-local and loads only
+after Pi trusts the project, so a reporter there would go silent the first time it runs somewhere
+new. `--no-pi` skips the step; `--pi-home` points at another agent directory. A host without
+`~/.pi/agent` is not an error — the Claude Code and DSH installs are unaffected, and re-running
+after Pi appears wires it then.
+
+Uninstall deletes **only a file carrying the reporter's marker**. The extensions directory is
+the user's and may hold their own work; a file that does not carry the marker is reported and
+left alone. The reporter is documented in
+[pi-csd-extension](../pi-csd-extension/README.md); its host row is `(label, pi)`.
+
+The dashboard's own personal agent (`native`) is the same binary and is *not* wired twice: the
+backend marks every child it spawns with `CSD_AGENT=1`, and the extension registers nothing when
+it sees that. Otherwise the agent you talk to would report its conversations as coding sessions.
+
+A host that runs Pi but not Claude Code:
+
+```bash
+export PYTHONPATH=~/csd-src/csd-agent
+python3 -m csd_agent pi install --source ~/csd-src
+python3 -m csd_agent pi status
+python3 -m csd_agent pi uninstall
+```
 
 ## Being driven: the one line it may write outside `~/.csd`
 

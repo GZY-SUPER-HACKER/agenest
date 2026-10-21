@@ -100,6 +100,8 @@ Backend deps are installed by `dev.sh` (fastapi, uvicorn[standard], pytest, http
 ```bash
 # DSH reporter (from sdk/dsh-csd-plugin/) — Node's built-in runner, no dependencies
 npm test
+# Pi reporter (from sdk/pi-csd-extension/) — same runner, no dependencies
+npm test
 ```
 
 ### agenest (the second tab)
@@ -152,6 +154,7 @@ sdk/cpctl/       the reporting CLI (Python ≥3.10, zero runtime deps)
 sdk/csd-agent/   the coding-agent host side: ssh tunnel, liveness probe, Claude Code hooks,
                  and the DSH reporter's installer (vendor → tarball → profile)
 sdk/dsh-csd-plugin/  the DeepSeek Harness side: a native Cordis plugin that reports turns (§28)
+sdk/pi-csd-extension/  the standalone `pi` CLI side: one extension file that reports runs (§31)
 sdk/csd_nanobot.py, sdk/agent-host-preflight.sh
 deploy/          installer, systemd unit, tailscale-prefly.sh
 ```
@@ -233,6 +236,14 @@ of your problems.
   wires both agents; `dsh plugin add <checkout>` records a `link:` to the checkout and is not a
   deployment. `csd-agent dsh install|status|uninstall` is the same module without the Claude
   Code half, for a DSH-only host (§28).
+- **A Pi run is a session, and the native personal agent is the same binary — so it must stay
+  inert.** `sdk/pi-csd-extension/csd-reporter.js` opens on `before_agent_start` and closes on
+  `agent_settled` with `AssistantMessage.stopReason` (`turn_end` is only a progress line, never a
+  boundary). `native.py` sets `CSD_AGENT=1` on every Pi child it spawns, and the extension
+  registers nothing when it sees it; reporting those runs would show the Agent tab talking to
+  itself. The install is **one copied file** under `~/.pi/agent/extensions/` (global only — the
+  project-local directory is trust-gated), and uninstall deletes only a file carrying the
+  reporter's marker. Diagnostics go to stderr because in `pi --print` stdout is the answer (§31).
 
 ### The credentials, and why their defaults differ
 

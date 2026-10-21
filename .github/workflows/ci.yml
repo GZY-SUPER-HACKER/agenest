@@ -67,3 +67,18 @@ jobs:
       # Zero runtime dependencies, so there is nothing to install first.
       - name: Test
         run: npm test
+
+  pi-reporter:
+    name: pi reporter
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/pi-csd-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Zero runtime dependencies; the suite drives a fake ExtensionAPI and a fake client.
+      - name: Test
+        run: npm test
