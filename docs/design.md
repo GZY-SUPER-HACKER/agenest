@@ -1714,6 +1714,77 @@ Also rejected: reporting DSH as a personal agent. DSH's ACP and SDK surfaces wou
 possible, but §17 already settled that the second tab is a channel onto the user's agent. A second
 kind of conversation there is a different product, not an adaptation of this one.
 
+## 29. A file crosses the channel as a path
+
+The conversation can carry files in both directions, and the mechanism is one sentence: **the
+agent and this service are on the same machine, so a file moves as a path rather than as bytes
+inside a protocol.** None of the four backends' protocols has a media frame. All four agents
+have file tools. Handing them a path is the interface they already implement, and it is the same
+interface for every one of them — which is why this is not a per-backend feature.
+
+**The user's file.** The page uploads the bytes; the service stores them under
+`attachments/in/<thread>/<attachment id>-<name>` and records the row in `agent_attachments`.
+The message the agent receives ends with one line per file:
+
+```
+[attachment a_1f…] screenshot.png: /srv/csd/data/attachments/in/t_…/a_1f…-screenshot.png
+```
+
+That line is doing two jobs, and both are deliberate. For the agent it is the instruction ("here
+is a file, here is where it is"). For the transcript it is the identity: the marker names our
+attachment id, so a later read resolves the id against the table and puts the file back on the
+message it came with. Stripping it is a lookup, not an inference about which words were a
+filename — and an id that does not resolve is left as text, because deleting words on the
+strength of their shape is how a transcript loses a sentence a model quoted back.
+
+**The agent's file.** The agent is told where to leave one — in its per-turn appendix for
+`native`, or in a one-line note at the end of the prompt for a backend with no appendix — and
+the supervisor drains that directory when the turn settles. Drain means **move**: the file leaves
+the outbox for `attachments/delivered/<conversation>/`, so a second drain cannot deliver it
+twice. The row written by the drain *is* the message: the agent's transcript has no entry for a
+handoff that happened on the filesystem, so history merges these rows into the conversation by
+time instead of decorating a neighbour. `history()` drains too, which repairs the one window a
+restart can open between "the turn ended" and "the event was handled".
+
+Rejected: **render every file the agent wrote.** The workspace is full of build output, caches
+and scratch files. Picking them out by extension or modification time would be §2's rule
+("reported, never inferred") applied to attachments, and it would make the transcript unusable
+on a real project. Rejected: **scan the reply for Markdown links or absolute paths.** A link is
+not a delivery — the agent may link to a URL or to a file it never meant to hand over — and it
+would make a prose parser decide what is an attachment. Rejected: **base64 in the prompt.** It
+inflates a 5 MB image into 7 MB of context, spends the model's context on bytes it will read
+through a tool anyway, and no backend's protocol would carry it either.
+
+**The upload is a raw body, not multipart.** The bytes have exactly one destination, so a parser
+that buffers or spools them first is a dependency and a second copy for nothing. The filename
+travels percent-encoded in `X-CSD-Filename` (headers are not UTF-8 by contract, and a Chinese
+filename is the ordinary case); the type travels in `Content-Type`. The size limit is enforced
+**while streaming** — `Content-Length` is a claim, the loop is the fact — and a rejected upload
+deletes its partial file rather than leaving one behind.
+
+**Downloads never carry the token in a URL.** `GET /api/agent/attachments/{id}` sits behind
+`access_header`, and the page fetches it with `fetch()` and a real header before showing a blob
+URL. An `<img src="…?token=…">` would write the credential that can drive an agent into browser
+history, `Referer` headers and every proxy log on the path — the same reason the agent stream is
+not `EventSource`. The response is `Content-Disposition: attachment` with
+`X-Content-Type-Options: nosniff`, because an uploaded HTML file rendered in this origin would be
+executing a file the page was merely asked to carry.
+
+**Tapping a card is "open with another app".** The page hands the blob to `navigator.share` when
+the browser supports sharing files, which on a phone is the system app chooser. Where it does not,
+opening falls back to a download. The explicit download arrow exists because "open" and "keep"
+are different intentions, and a single button would have to guess.
+
+**The outbox line is stripped from the transcript.** It is addressed to the agent; the reader
+does not need to see instructions about a directory. This is also why the channel note is a
+single line rather than a paragraph: it is paid for in the agent's context on every prompt for
+those backends, and the long form is the appendix, which only `native` has.
+
+Not built, deliberately: thumbnails (the phone's image decoder is already the right thumbnailer),
+old-attachment cleanup (the files are the transcript's record; a retention policy is the
+operator's decision, not a default), resumable uploads, and sending a file to a *coding agent* on
+another machine. That last one is a different path — it would go over the agent's own `ssh`, not
+over this channel — and is not implied by this one.
 ## 31. Pi reports runs, and the personal agent it also powers stays silent
 
 Standalone `pi` is a coding agent and follows §13's shape: the machine running it originates the

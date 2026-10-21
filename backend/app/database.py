@@ -209,6 +209,39 @@ CREATE INDEX IF NOT EXISTS idx_agent_threads_updated
 -- frame, so it gets an index of its own.
 CREATE INDEX IF NOT EXISTS idx_agent_threads_conversation
     ON agent_threads (backend_conversation_id);
+
+-- --------------------------------------------------------------------------
+-- Files carried by a conversation (docs/design.md §29).
+--
+-- Separate from `agent_threads` for the same reason the thread table is separate from
+-- `sessions`: this is a record *we* keep, and it is the one part of the conversation the
+-- agent's own transcript cannot carry. A channel whose protocol has no media frame moves
+-- bytes through our disk and a path in the message text; the path is how the agent reads an
+-- incoming file, and the outbox is how it hands one back.
+--
+-- `direction` is `in` (the user sent it) or `out` (the agent put it in the outbox). An
+-- outgoing row is the message: it has no counterpart in the agent's transcript, so history
+-- merges these rows into the transcript rather than decorating an existing entry.
+--
+-- `path` is absolute on this host. It is ours to serve; the agent is only ever told it.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_attachments (
+    id              TEXT PRIMARY KEY,
+    thread_id       TEXT NOT NULL REFERENCES agent_threads (id) ON DELETE CASCADE,
+    -- The backend's conversation id at delivery time. Nullable because an incoming file can
+    -- be uploaded before the first message has created a conversation; outgoing rows always
+    -- have one, because the outbox is per conversation.
+    conversation_id TEXT,
+    direction       TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    name            TEXT NOT NULL,
+    mime            TEXT NOT NULL,
+    size            INTEGER NOT NULL,
+    path            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_attachments_thread
+    ON agent_attachments (thread_id, created_at, id);
 """
 
 

@@ -158,6 +158,12 @@ Pi 需要 Node 22.19+（前端本身只要 18+）。然后在 `.env` 里放一�
 Agent 页的行为边界、工具权限和记忆机制都在 [docs/design.md](docs/design.md) §17–§27，
 这里不再重复。简单说：它是一个通往 personal agent 的通道，不是一个内嵌的 agent 框架。
 
+**对话可以收发文件。** 输入框左边的 `+` 可以选图片或文件，发送后图片直接在气泡里显示，
+其他文件显示成卡片；点卡片会用手机的系统分享面板打开（浏览器不支持时退化为下载），旁边
+的箭头是直接下载。反方向：agent 把文件写进它的 **outbox** 目录，一轮结束时服务会把它变成
+会话里的附件——它只是写在工作目录里的文件不会被发送，因为「agent 写过」不等于「agent 想
+交给你」。机制和取舍见 [docs/design.md](docs/design.md) §29。
+
 ## 配置
 
 所有配置都走环境变量，没有写死在代码里的地址。完整的带注释列表在
@@ -172,6 +178,8 @@ Agent 页的行为边界、工具权限和记忆机制都在 [docs/design.md](do
 | `CSD_STATIC_DIR` | 不设 | 构建后的前端目录；不设则只提供 API |
 | `CSD_AGENT_BACKEND` | `native` | 默认 personal agent |
 | `CSD_PI_WORKSPACE` | 不设 | `native` 的工作目录；默认空 scratch 目录 |
+| `CSD_ATTACHMENTS_DIR` | 数据库旁的 `attachments/` | 会话收发的文件：上传、agent 的 outbox、已送达文件 |
+| `CSD_ATTACHMENT_MAX_MB` | `25` | 单个文件大小上限，上传时边写边计数 |
 
 ## 部署
 

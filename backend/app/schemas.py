@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utcnow() -> str:
@@ -463,15 +463,47 @@ class AgentRole(str, Enum):
 
 
 class AgentMessageCreate(ApiModel):
-    content: str = Field(max_length=MAX_SUMMARY)
+    """A prompt, optionally carrying files.
+
+    `content` may be blank **only when there is at least one attachment** — sending a photo
+    with no caption is a message, and refusing it would make the + button useless on its own.
+    The cross-field rule is stated here rather than in the route so a malformed body is a 422
+    with the field named, the same as any other validation failure.
+    """
+
+    content: str = Field(default="", max_length=MAX_SUMMARY)
+    #: Ids returned by the upload route, in the order the user attached them. Ten is a message
+    #: with an album in it; beyond that the page is a file manager, which this is not.
+    attachment_ids: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("content")
     @classmethod
-    def _not_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("content must not be blank")
-        return v
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _not_blank(self) -> "AgentMessageCreate":
+        if not self.content.strip() and not self.attachment_ids:
+            raise ValueError("content or attachment_ids must be provided")
+        return self
+
+
+class AgentAttachmentOut(ApiModel):
+    """A file carried by the conversation, in one direction.
+
+    The bytes are served by `GET /api/agent/attachments/{id}`; this model is the metadata the
+    transcript needs to draw a card. `direction` is on the wire because the page draws an
+    incoming file inside the user's bubble and an outgoing one as the agent's own — the same
+    distinction the message roles already carry, made explicit for a card that may stand
+    alone with no text around it.
+    """
+
+    id: str
+    name: str
+    mime: str
+    size: int
+    direction: Literal["in", "out"] = "in"
+    created_at: str | None = None
 
 
 class AgentMessageOut(ApiModel):
@@ -502,6 +534,11 @@ class AgentMessageOut(ApiModel):
     is_error: bool = False
     created_at: str
     progress: bool = False
+    #: Files delivered with this message (docs/design.md §29). The message text carries a
+    #: marker line naming each file's path — that is what the agent reads — and this list is
+    #: the resolved half the page draws. The marker is stripped from `content` on the way out,
+    #: so the page never has to parse it and a client that ignores this field sees clean text.
+    attachments: list[AgentAttachmentOut] = []
 
 
 class AgentThreadOut(ApiModel):

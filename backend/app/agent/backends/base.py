@@ -61,6 +61,28 @@ class Delta:
 
 
 @dataclass(slots=True)
+class Attachment:
+    """A file delivered with a message (docs/design.md §29).
+
+    Part of the normalized vocabulary rather than a backend-specific shape: every backend's
+    agent runs on this machine with file tools, so every backend can be handed a path and
+    every backend's outbox can be drained by the same code. What differs is only *how* the
+    agent is told — a per-turn appendix where one exists, a one-line channel note otherwise.
+
+    `direction` says which way the bytes went. It is on the normalized event because an
+    outgoing attachment is a message with no counterpart in the agent's transcript: the row
+    is the delivery, not a decoration on somebody else's message.
+    """
+
+    id: str
+    name: str
+    mime: str
+    size: int
+    direction: Literal["in", "out"] = "in"
+    created_at: str | None = None
+
+
+@dataclass(slots=True)
 class Message:
     """A completed unit of conversation.
 
@@ -99,6 +121,7 @@ class Message:
     is_error: bool = False
     created_at: str | None = None
     progress: bool = False
+    attachments: list[Attachment] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -272,6 +295,7 @@ class AgentBackend(Protocol):
 
 __all__ = [
     "AgentBackend",
+    "Attachment",
     "BackendError",
     "BackendEvent",
     "BackendStatus",

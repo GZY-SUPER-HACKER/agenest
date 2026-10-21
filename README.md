@@ -486,6 +486,32 @@ continued from Telegram appears from that point on and is not retroactively fill
 that started and never finished has no outcome, and the page will not invent one — the same rule
 [§2](docs/design.md) applies to session status, at a much shorter timescale.
 
+### Files and images
+
+The composer has a `+` to the left of the input: **Photo** opens the picture picker, **File**
+opens the file browser, and what you choose appears as a chip above the input until you send it.
+A message may be a file with no caption. Images render inline in the transcript; everything else
+renders as a card with its name and size. Tapping a card hands the file to the phone's share
+sheet (or saves it, where a browser has no share sheet); the arrow beside it downloads it.
+
+Both directions use the same idea: **the agent and the page are on the same machine, so a file
+crosses the channel as a path, not as bytes in a protocol that has no media frame.**
+
+- **You → agent.** The upload lands in `attachments/` beside the database, and the message the
+  agent receives ends with a line naming the absolute path. It opens the file with the tools it
+  already has. The transcript keeps a card on that message, not the path.
+- **Agent → you.** The agent is told — in its per-turn appendix, or in a one-line note at the end
+  of the prompt for a gateway agent with no appendix — to write a file into its **outbox**
+  directory. When the turn ends the service moves whatever is there into the conversation as an
+  attachment, and the outbox is emptied so nothing is delivered twice. Files the agent merely
+  writes in its workspace are *not* sent: "the agent wrote this" is not "the agent meant to hand
+  it to you" (§29).
+
+Attachments are served only behind the access token, and the page fetches them with `fetch()`
+and shows a blob URL rather than putting the token in an `<img src>` — the same rule the agent
+stream follows. Uploads are capped at 25 MB (`CSD_ATTACHMENT_MAX_MB`) and written straight to
+disk as they stream.
+
 ### Memory
 
 Pi is this service's agent — we run the process, choose its arguments, and speak its protocol —
@@ -624,6 +650,11 @@ for an approved host and tells the agent where it is; the `ssh` is the agent's o
   this host; it authenticates this client to the gateway.
 - The agent stream is consumed with `fetch()` rather than `EventSource`, so this token
   travels in a header instead of a URL.
+- **Attachments are behind the same token**, and the page fetches their bytes the same way —
+  with a header, then a blob URL. An `<img src="…?token=…">` would put the credential that can
+  drive the agent into browser history and every proxy log on the path. The download route
+  also sends `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`: an
+  uploaded HTML file must not render in this origin.
 
 ---
 
@@ -643,6 +674,8 @@ the annotated list.
 | `CSD_AGENT_PROGRESS` | `1` | Ask the agent for one progress line per stage. `0` turns the narration off. |
 | `CSD_AGENT_MACHINES_FILE` | `<workspace>/MACHINES.md` | Your own notes about the machines the agent may `ssh` to (`cd` targets, which agent is installed); appended to its system prompt every message. Write it by hand. |
 | `CSD_AGENT_KEY_DIR` | `$HOME/.ssh` | Where keys minted for approved hosts are kept (0600). `$HOME` is the agent's own home under systemd, so the default is where `ssh` already looks. |
+| `CSD_ATTACHMENTS_DIR` | `<db dir>/attachments` | Where files carried by the conversation live: uploads, the agent's outbox, and delivered files. |
+| `CSD_ATTACHMENT_MAX_MB` | `25` | Largest single file in either direction, enforced while the upload streams. |
 | `CSD_AGENT_BACKEND` | `native` | Which agent to talk to: `native` (local Pi) or `nanobot` (a gateway). Switchable at runtime. |
 | `CSD_PI_ENV_KEYS` | see `.env.example` | Provider keys forwarded to the local agent. |
 | `CSD_NANOBOT_WS_URL` | `ws://127.0.0.1:8765/` | The nanobot gateway's websocket channel (only used with `CSD_AGENT_BACKEND=nanobot`). |
@@ -702,7 +735,10 @@ it is not configured at all.
 | `POST` | `/api/agent/switch` | Switch and return the conversation to show, in **one** request — the page uses this. `?process=false` omits tool rows |
 | `POST` | `/api/agent/session` | **The** conversation, created on first call. Idempotent — see below |
 | `GET` | `/api/agent/threads/{id}` | One conversation with its messages. `?process=false` omits tool rows |
-| `POST` | `/api/agent/threads/{id}/messages` | Send a prompt. **202** — accepted, not answered |
+| `POST` | `/api/agent/threads/{id}/messages` | Send a prompt. **202** — accepted, not answered. Body may carry `attachment_ids` |
+| `POST` | `/api/agent/threads/{id}/attachments` | Upload one file (raw body, `X-CSD-Filename`). **201** with the id to send |
+| `GET` | `/api/agent/attachments/{id}` | The file's bytes, `Content-Disposition: attachment`, `nosniff` |
+| `DELETE` | `/api/agent/attachments/{id}` | Forget an upload that never reached a message |
 | `POST` | `/api/agent/threads/{id}/abort` | Stop the current run |
 | `GET` | `/api/agent/stream` | SSE; `?thread_id=<id>` to filter. **No cursor** — see below |
 | `GET` | `/api/agent/memory` | The memory files, the journal's backlog, and recent commits |
@@ -939,6 +975,7 @@ backend/
     agent/        agenest: the agent clients — a backend seam, nanobot, and a local Pi
                   rpc.py is the Pi JSONL transport the `native` backend drives
                   memory.py is the `native` agent's long-term memory (journal + Dream)
+                  attachments.py is files both ways: uploads, the outbox, the path marker
     schemas.py    the contract: statuses, event types, length caps, timestamp form
     stream.py     the in-process SSE broker + cursor, and the agent's cursorless one
     auth.py       the ingest token and the page's access token

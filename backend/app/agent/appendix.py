@@ -1,6 +1,6 @@
 """The per-turn appendix: what the agent is told on every prompt, beyond its own code.
 
-Four sections ride here, in one order, and the order is the argument:
+Five sections ride here, in one order, and the order is the argument:
 
 1. **Memory** — `.recall.md`, regenerated from the durable files by `memory.write_recall_file`.
 2. **Machines** — where the agent may go and what lives there, from an operator-authored file.
@@ -8,7 +8,8 @@ Four sections ride here, in one order, and the order is the argument:
    whose connector reported itself, and which of them the user has authorized (§24). The list
    itself is deliberately *not* here: it grows with the fleet, and the prompt is paid for on
    every message.
-4. **Progress notes** — how to report while working, last so the instruction is the freshest
+4. **Sending files** — the outbox, where the agent leaves a file for the user (§29).
+5. **Progress notes** — how to report while working, last so the instruction is the freshest
    thing in the prompt.
 
 **Why they travel as paths plus one string, rather than as assembled text.** Pi reads
@@ -83,6 +84,37 @@ never invent a credential or an address.
 #: that is not there is worse than no sentence, because the agent will call it and fail.
 REGISTRY_TOOL_NOTE = " For live host and running-session state, call the `csd_registry` tool."
 
+#: Where the agent hands a file to the user (docs/design.md §29). The path is per conversation
+#: and is formatted in when the process starts; what matters here is the *contract*: write into
+#: the directory, and the file is delivered when the turn ends.
+ATTACHMENTS_NOTE = """\
+## Sending files to the user
+
+The user sees this conversation, not your filesystem. To hand them a file — an image, a report,
+a build artifact — write it into `{outbox}` (create the directory if it does not exist).
+Everything there is delivered as an attachment when the turn ends, and the directory is then
+emptied, so a file you want to send must be written afresh each time.
+
+- The file in the outbox *is* the delivery. Do not paste its path into your reply instead.
+- Images are shown inline; everything else arrives as a downloadable file.
+- Only files you put there are sent. Scratch files elsewhere in your workspace stay yours.
+"""
+
+#: The same instruction, compressed to one line, for a backend whose agent has no per-turn
+#: appendix: it rides at the end of each prompt and is stripped from the transcript on display.
+ATTACHMENTS_CHANNEL_LINE = (
+    "[channel] To send the user a file, write it into {outbox}; it is delivered when the turn "
+    "ends."
+)
+
+
+def attachments_section(outbox: Path) -> str:
+    return ATTACHMENTS_NOTE.format(outbox=outbox)
+
+
+def attachments_channel_line(outbox: Path) -> str:
+    return ATTACHMENTS_CHANNEL_LINE.format(outbox=outbox)
+
 
 def registry_index(path: Path | None, *, tool: bool) -> str | None:
     """The index section, or `None` when there is no workspace to keep the file in."""
@@ -133,7 +165,7 @@ def appendix_files(settings: Settings) -> list[Path]:
     return files
 
 
-def appendix_text(settings: Settings) -> str | None:
+def appendix_text(settings: Settings, *, outbox: Path | None = None) -> str | None:
     """The whole appendix as one string, or `None` when there is nothing to say.
 
     Only for the **fallback path**: a deployment whose extension file is missing still has to get
@@ -142,6 +174,10 @@ def appendix_text(settings: Settings) -> str | None:
 
     `tool=False` for the registry index here: this path has no extension loaded, so there is no
     `csd_registry` to call. The file is still named, because the file is still there.
+
+    `outbox` is per conversation and the command line is built per process, so this path can
+    still name the exact directory even though it is a snapshot. Without one (a config check,
+    which starts no turn) the section is omitted rather than promising a path that is not real.
     """
     parts: list[str] = []
     memory_dir = settings.resolved_memory_dir
@@ -155,17 +191,23 @@ def appendix_text(settings: Settings) -> str | None:
     index = registry_index(settings.resolved_registry_file, tool=False)
     if index:
         parts.append(index)
+    if outbox is not None:
+        parts.append(attachments_section(outbox))
     if settings.agent_progress:
         parts.append(PROGRESS_NOTES)
     return "\n\n".join(parts) if parts else None
 
 
 __all__ = [
+    "ATTACHMENTS_CHANNEL_LINE",
+    "ATTACHMENTS_NOTE",
     "MACHINES_PREAMBLE",
     "PROGRESS_NOTES",
     "REGISTRY_INDEX",
     "appendix_files",
     "appendix_text",
+    "attachments_channel_line",
+    "attachments_section",
     "machines_section",
     "registry_index",
 ]

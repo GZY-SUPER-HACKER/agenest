@@ -27,20 +27,24 @@ routes that take a `thread_id` still do because the id is what the page holds.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
+from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
-from ..agent import endpoints, native_config, onboard, registry, store
+from ..agent import attachments, endpoints, native_config, onboard, registry, store
 from ..agent.backends import BackendError, BackendUnavailable
 from ..agent.memory import MEMORY_FILE, SOUL_FILE, USER_FILE
 from ..agent.rpc import PiTimeout
 from ..agent.supervisor import Supervisor
 from ..auth import access_header
 from ..schemas import (
+    AgentAttachmentOut,
     AgentBackendSwitch,
     AgentDreamOut,
     AgentEndpointIn,
@@ -551,7 +555,176 @@ async def send_message(
     """
     if store.get_thread_row(store_db, thread_id) is None:
         raise _unknown_thread(thread_id)
-    return await _run(supervisor.prompt(thread_id, data.content))
+    try:
+        return await _run(
+            supervisor.prompt(thread_id, data.content, data.attachment_ids)
+        )
+    except attachments.AttachmentError as exc:
+        # An attachment id that is not this conversation's. A 400 rather than a 502: the agent
+        # never saw this request, so saying "the agent failed" would send someone to the wrong
+        # layer. The message names the condition.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+
+
+# --------------------------------------------------------------------------- #
+# attachments (docs/design.md §29)
+#
+# The upload is a **raw body**, not multipart, for one reason: the bytes go straight to disk
+# and a multipart parser would buffer or spool them first, which is a dependency and a second
+# copy for a file that has exactly one destination. The filename rides in a header, the type
+# in `Content-Type`.
+#
+# Downloads are `access_header`-gated like everything that can act — the page fetches them
+# with `fetch()` and a real header and hands the browser a blob URL, so — as with the agent
+# stream — this credential never has to travel in a URL that can serve a file.
+# --------------------------------------------------------------------------- #
+def _too_large(limit: int) -> HTTPException:
+    return HTTPException(
+        # Spelled as a number because Starlette renamed the constant
+        # (`HTTP_413_REQUEST_ENTITY_TOO_LARGE` -> `HTTP_413_CONTENT_TOO_LARGE`); picking
+        # either name makes this file depend on which side of the rename is installed.
+        status_code=413,
+        detail=f"the file is larger than this server accepts ({limit // (1024 * 1024)} MB)",
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/attachments",
+    response_model=AgentAttachmentOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a file for the next message",
+)
+async def upload_attachment(
+    thread_id: str,
+    request: Request,
+    db: deps.DbDep,
+    settings: deps.SettingsDep,
+) -> AgentAttachmentOut:
+    """Store one file and return the id to send with the message.
+
+    Nothing is sent to the agent here: an upload is a file on our disk until the message that
+    names it exists. That is what lets the page show a failed message without leaving the agent
+    with a path to a file it was never told about.
+
+    The size limit is enforced **while streaming**, not from `Content-Length`. A declared
+    length is a claim; the loop is the fact.
+    """
+    thread = store.get_thread_row(db, thread_id)
+    if thread is None:
+        raise _unknown_thread(thread_id)
+
+    raw_name = request.headers.get("x-csd-filename", "")
+    # The header is percent-encoded by the client, because HTTP headers are not UTF-8 by
+    # contract and a Chinese filename is the ordinary case here. Capped before decoding: a
+    # header is attacker-controlled and there is no reason to allocate a megabyte for a name.
+    name = attachments.safe_name(unquote(raw_name[:1024])) if raw_name else "file"
+
+    limit = settings.attachment_max_bytes
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise _too_large(limit)
+
+    try:
+        attachment_id, target = attachments.incoming_target(settings, thread_id, name)
+    except OSError as exc:
+        # The storage directory is the operator's to fix; saying so beats a traceback.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"could not store the upload: {exc}",
+        ) from None
+
+    size = 0
+    try:
+        with target.open("wb") as handle:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise _too_large(limit)
+                handle.write(chunk)
+        with contextlib.suppress(OSError):
+            target.chmod(0o600)
+    except HTTPException:
+        with contextlib.suppress(OSError):
+            target.unlink()
+        raise
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            target.unlink()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"could not store the upload: {exc}",
+        ) from None
+
+    row = attachments.record(
+        db,
+        attachment_id=attachment_id,
+        thread_id=thread_id,
+        conversation_id=thread["backend_conversation_id"],
+        direction="in",
+        name=name,
+        mime=attachments.mime_for(name, request.headers.get("content-type")),
+        size=size,
+        path=target,
+    )
+    return attachments.to_out(row)
+
+
+@router.get(
+    "/attachments/{attachment_id}",
+    summary="One attachment's bytes",
+    response_class=FileResponse,
+)
+def download_attachment(attachment_id: str, db: deps.DbDep) -> FileResponse:
+    """The file, with its stored name and type.
+
+    `Content-Disposition: attachment` (what `FileResponse` sends when given `filename`) and
+    `nosniff` are both deliberate: these bytes came from a phone or an agent, and a browser
+    that renders an uploaded HTML file in this origin would be executing a file the page was
+    merely asked to carry. The page turns the response into a blob and offers it to the user.
+    """
+    row = attachments.get(db, attachment_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="unknown attachment"
+        )
+    path = Path(row["path"])
+    if not path.is_file():
+        # The row is the record, the file is the fact. Saying so beats a FileResponse traceback
+        # or a 500 that reads as "the server is broken".
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="the attachment's file is no longer on disk",
+        )
+    return FileResponse(
+        path,
+        media_type=row["mime"],
+        filename=row["name"],
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.delete(
+    "/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Forget an attachment that was never sent",
+)
+def delete_attachment(attachment_id: str, db: deps.DbDep) -> Response:
+    """Forget an upload whose message got an error answer from this server.
+
+    The contract is the caller's: it names an upload it never sent. The route does not verify
+    that no message carries the id — proving it would mean reading the agent's whole transcript
+    for a marker — so calling it on a delivered attachment removes the bytes under a card that
+    history still draws. The page is deliberately narrower than that: a **transport** failure
+    leaves the bytes alone, because the message may have been accepted before the connection
+    dropped. Only an answer that arrived and was an error proves nothing landed.
+    """
+    if attachments.delete(db, attachment_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="unknown attachment"
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

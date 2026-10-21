@@ -711,17 +711,26 @@ def test_a_failed_tool_is_reported_as_failed(gateway) -> None:
 
 def test_chat_send_carries_an_idempotency_key(app_client) -> None:
     """`idempotencyKey` is required on this method. Sending without one is a protocol
-    violation, and reusing one across a retry is how a doubled message is avoided."""
+    violation, and reusing one across a retry is how a doubled message is avoided.
+
+    The wire message also carries the one-line **channel note** (docs/design.md §29): OpenClaw
+    has no per-turn appendix, so that line is how its agent learns where to leave a file for the
+    user. It is addressed to the agent and is stripped from what the page renders — the user's
+    words must come back as exactly what they typed.
+    """
     client, db, gateway = app_client
     _wait_for(lambda: _connected(client))
     thread_id = _new_thread(client)
 
-    _say(client, thread_id, "hello")
+    response = _say(client, thread_id, "hello")
     _wait_for(lambda: gateway._frames("chat.send"))
     send = gateway._frames("chat.send")[0]
     assert send["params"]["idempotencyKey"]
     assert send["params"]["sessionKey"]
-    assert send["params"]["message"] == "hello"
+    wire = send["params"]["message"]
+    assert wire.startswith("hello\n\n")
+    assert "[channel]" in wire and "outbox" in wire
+    assert response.json()["content"] == "hello"
 
 
 def test_send_says_nothing_because_the_gateway_names_no_id(gateway) -> None:

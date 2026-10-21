@@ -21,6 +21,7 @@
 
 import { UNAUTHORIZED, readToken } from "./client";
 import type {
+  AgentAttachment,
   AgentMessage,
   AgentStatus,
   AgentStreamFrame,
@@ -149,11 +150,71 @@ export function openAgentSession(): Promise<AgentThread> {
   return agentFetch<AgentThread>("/api/agent/session", { method: "POST" });
 }
 
-export function sendAgentMessage(threadId: string, content: string): Promise<AgentMessage> {
+export function sendAgentMessage(
+  threadId: string,
+  content: string,
+  attachmentIds: string[] = [],
+): Promise<AgentMessage> {
   return agentFetch<AgentMessage>(
     `/api/agent/threads/${encodeURIComponent(threadId)}/messages`,
-    { method: "POST", body: JSON.stringify({ content }) },
+    {
+      method: "POST",
+      body: JSON.stringify({ content, attachment_ids: attachmentIds }),
+    },
   );
+}
+
+/**
+ * Upload one file and get the id to send with the next message.
+ *
+ * The body is the file itself rather than a multipart envelope: the backend streams it
+ * straight to disk, so there is nothing for a parser to unpack. The filename goes in a header,
+ * percent-encoded because HTTP header values are not UTF-8 by contract and a Chinese filename
+ * is the ordinary case here.
+ */
+export function uploadAgentAttachment(
+  threadId: string,
+  file: File,
+): Promise<AgentAttachment> {
+  return agentFetch<AgentAttachment>(
+    `/api/agent/threads/${encodeURIComponent(threadId)}/attachments`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-CSD-Filename": encodeURIComponent(file.name),
+      },
+      body: file,
+    },
+  );
+}
+
+/**
+ * The bytes behind one attachment, as a blob.
+ *
+ * Deliberately not an `<img src>`: that would need the access token in the URL, and this
+ * credential can drive an agent. The page fetches with a header and hands the browser a blob
+ * URL, exactly as the stream does. Kept out of `agentFetch` because the response is not JSON.
+ */
+export async function fetchAgentAttachment(id: string): Promise<Blob> {
+  const token = readToken();
+  const response = await fetch(
+    `${API_BASE}/api/agent/attachments/${encodeURIComponent(id)}`,
+    { headers: { Accept: "*/*", ...(token ? { "X-CPD-Token": token } : {}) } },
+  );
+  if (response.status === 403) throw new Error(AGENT_DISABLED);
+  if (response.status === 401) throw new Error(UNAUTHORIZED);
+  if (!response.ok) {
+    throw new Error(`attachment -> ${response.status} ${response.statusText}`);
+  }
+  return response.blob();
+}
+
+/** Remove an upload that never reached a message — the page's cleanup on a failed send. */
+export function deleteAgentAttachment(id: string): Promise<void> {
+  return agentFetch<void>(`/api/agent/attachments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function abortAgentRun(threadId: string): Promise<{ aborted: boolean }> {

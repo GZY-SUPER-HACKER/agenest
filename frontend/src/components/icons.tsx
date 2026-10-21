@@ -177,3 +177,41 @@ export function IconSettings(props: IconProps) {
     </Svg>
   );
 }
+
+/** The composer's attach affordance, left of the input. */
+export function IconPlus(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </Svg>
+  );
+}
+
+export function IconImage(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <circle cx="8.5" cy="9.5" r="1.5" />
+      <path d="M21 16l-4.5-4.5L7 21" />
+    </Svg>
+  );
+}
+
+export function IconFile(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+    </Svg>
+  );
+}
+
+/** The explicit download half of an attachment card. */
+export function IconDownload(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 4v11M7.5 10.5L12 15l4.5-4.5" />
+      <path d="M5 19h14" />
+    </Svg>
+  );
+}
