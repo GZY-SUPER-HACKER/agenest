@@ -29,6 +29,50 @@ pass `--token`). Switching an existing remote install to `--local` removes the l
 tunnel unit rather than leaving two answers to "how does this host reach the dashboard" on
 disk at once.
 
+### On Windows
+
+There is no systemd, so the installer writes the two things Windows actually has: a **Startup
+entry** for the tunnel keeper and a **Task Scheduler** task for the heartbeat. The hooks are
+the same file merge as everywhere else.
+
+```powershell
+# from the repo, with a normal Python (not a project venv — the hook bakes this path)
+python -m csd_agent install --cloud <dashboard-host> --cloud-user root `
+    --python C:/path/to/Python312/python.exe --no-drive
+```
+
+Or, when the dashboard is already published at an address this machine can reach (Tailscale
+Funnel, a reverse proxy):
+
+```powershell
+python -m csd_agent install --url https://<dashboard> --no-drive
+```
+
+`--url` removes the tunnel entirely. It is the right shape when the published endpoint
+answers quickly; prefer the tunnel when the endpoint is slow, because the hook wrapper gives a
+report **2 seconds** before it gives up. A TLS handshake to a distant Funnel can take longer
+than that, and a hook that blocks on every prompt is worse than one that reports nothing.
+
+**What survives a reboot on Windows:**
+
+| | Where it lives | When it comes back |
+|---|---|---|
+| hooks | `~/.claude/settings.json` | always — it is just a config file |
+| tunnel | `%APPDATA%\…\Startup\csd-agent-tunnel.vbs` | at logon; the keeper restarts `ssh` in a loop |
+| heartbeat | Task Scheduler, `CSD-Agent Heartbeat` | every 5 minutes after logon |
+
+Nothing runs before a user logs in, and there is deliberately no service: installing one
+needs admin rights and is a bigger commitment than this connector should make on your
+machine. While the machine is off or logged out, the dashboard shows the host as *maybe
+offline* — which is what is actually true. The tunnel starts with no terminal, so the SSH key
+must work without a passphrase prompt (an unencrypted key, or one loaded into the Windows
+OpenSSH agent); `BatchMode=yes` turns a protected key into a missing tunnel rather than a
+prompt nobody can answer.
+
+`csd-agent status` prints the tunnel port and the scheduled task next to the Linux unit
+checks, so "did it reconnect after the reboot?" has an answer without opening Task Scheduler.
+
+
 ---
 
 ## Why this exists
@@ -64,6 +108,11 @@ question, and "nothing outside your home directory" is a better answer than a li
 ~/.pi/agent/extensions/csd-reporter.js  one copied file, the whole Pi install
 ```
 
+On Windows the systemd directory is replaced by
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\csd-agent-tunnel.vbs`, and the timer
+by the Task Scheduler task `CSD-Agent Heartbeat`. `bin/` also holds the two `pythonw`
+launchers those entries run.
+
 No sudo, no pip, no conda environment, nothing outside `$HOME`. `csd-agent uninstall` reverses
 all of it except the `~/.csd` directory itself, which it tells you to remove by hand once you are
 sure.
@@ -72,7 +121,7 @@ sure.
 
 | Command | What it is |
 |---|---|
-| `install` | one-time setup; vendors the code, writes the env file and the systemd units, merges the Claude Code hooks, wires every DSH profile and the Pi extension, verifies |
+| `install` | one-time setup; vendors the code, writes the env file and the service entries (systemd units, or the Windows Startup + Task Scheduler pair), merges the Claude Code hooks, wires every DSH profile and the Pi extension, verifies |
 | `status` | what this host believes, which units are up, which DSH profiles carry the reporter, whether the Pi extension is in place, and whether the API actually answers |
 | `heartbeat` | the probe. Run by a timer every 5 minutes; also fine to run by hand |
 | `hook` | what Claude Code calls. Reads the payload on stdin; **always exits 0** |
@@ -236,6 +285,10 @@ mapping is one line each in `csd_agent/hooks.py`.
 - Linux with systemd user units, and **lingering enabled** (`loginctl enable-linger $USER`)
   or the units die when you log out. The installer checks this and tells you — it does not
   need sudo on the machines this was built for.
+- **Windows 10/11** with Git Bash (`bash` on PATH — Claude Code hooks call the wrapper
+  through it), Python ≥3.10 including `pythonw.exe`, the OpenSSH client, and `curl`. The
+  installer writes a Startup entry and a Task Scheduler task instead of systemd units; see
+  [On Windows](#on-windows). No admin rights are needed.
 - Python ≥ 3.10, which is what both SDK packages declare. Nothing here needs 3.11, and 3.10 is
   still common on agent hosts; the floor matches reality rather than making every deployment
   work around it.

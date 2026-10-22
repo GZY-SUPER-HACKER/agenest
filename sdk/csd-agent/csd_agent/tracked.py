@@ -181,6 +181,12 @@ def process_alive(entry: Tracked) -> bool:
     """
     if entry.pid <= 1:
         return False
+    if os.name == "nt":
+        # **Never `os.kill(pid, 0)` here.** On Windows it is not a probe: the implementation
+        # opens the process and calls TerminateProcess with the signal as the exit code. A
+        # liveness check that kills the session it is asking about is the worst bug this
+        # package could ship. `_win_process_alive` uses OpenProcess instead.
+        return _win_process_alive(entry.pid)
     try:
         os.kill(entry.pid, 0)
     except ProcessLookupError:
@@ -213,6 +219,8 @@ def find_cc_pid() -> int:
     from the outside. Anything under our own home is skipped, so the wrapper that invoked
     us can never be mistaken for the agent.
     """
+    if os.name == "nt":
+        return _win_find_cc_pid()
     skip = str(config.agent_home())
     pid = os.getpid()
     for _ in range(24):
@@ -232,3 +240,118 @@ def find_cc_pid() -> int:
             if candidate == "claude" or candidate.startswith("claude-"):
                 return pid
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Windows: the same two questions, asked through kernel32
+# --------------------------------------------------------------------------- #
+
+def _win_process_alive(pid: int) -> bool:
+    """Does this pid still name a running process?
+
+    **`os.kill(pid, 0)` cannot be used here.** On Windows it is not a probe: Python's
+    implementation opens the process and calls `TerminateProcess` with the signal as the
+    exit code. A liveness check that kills the session it is asking about is the worst bug
+    this package could ship. `OpenProcess` + `GetExitCodeProcess` answer the question
+    without touching the process.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win_find_cc_pid() -> int:
+    """Walk our parent chain via Toolhelp32 and return the first Claude Code process.
+
+    Toolhelp gives an executable name but not a command line, so a Claude Code launched as
+    `node.exe …` cannot be told apart from any other Node process. Returning 0 in that case
+    is deliberate: `heartbeat` already treats an unknown pid as "cannot judge", while a
+    guessed pid would let the probe announce the death of a live session.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == INVALID_HANDLE:
+        return 0
+
+    parent_of: dict[int, tuple[int, str]] = {}
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return 0
+        while True:
+            parent_of[int(entry.th32ProcessID)] = (
+                int(entry.th32ParentProcessID),
+                str(entry.szExeFile).lower(),
+            )
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    pid = os.getpid()
+    for _ in range(24):
+        parent = parent_of.get(pid, (0, ""))[0]
+        if parent <= 1:
+            break
+        pid = parent
+        name = parent_of.get(pid, (0, ""))[1]
+        if name == "claude.exe" or name.startswith("claude-"):
+            return pid
+
+    # The chain can break on Windows: a launcher that exits leaves its child pointing at a
+    # dead parent pid (there is no reparenting), and the walk then stops before reaching
+    # Claude Code. Falling back to "the only claude.exe on this machine" is safe — and if
+    # there is more than one, returning 0 is the right answer, because attributing a session
+    # to the wrong window would let the heartbeat close a live session.
+    candidates = sorted(
+        candidate
+        for candidate, (_parent, name) in parent_of.items()
+        if name == "claude.exe" or name.startswith("claude-")
+    )
+    return candidates[0] if len(candidates) == 1 else 0

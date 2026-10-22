@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -50,6 +51,103 @@ HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "SessionEnd")
 #: and one retry by the wrapper, so this is a backstop for a wedged interpreter.
 HOOK_TIMEOUT = 20
 
+#: Windows has no systemd user units. Task Scheduler is the equivalent for the one job that
+#: must outlive a hook: the five-minute liveness probe. The tunnel is deliberately absent —
+#: on Windows the supported remote shape is `--url` (a published dashboard), because a hook
+#: is a short-lived process and needs no daemon at all.
+IS_WINDOWS = os.name == "nt"
+HEARTBEAT_TASK = "CSD-Agent Heartbeat"
+
+#: Per-user startup folder. The tunnel is a *long-running* process, and Task Scheduler gives
+#: a task a 72-hour execution limit by default — a tunnel that silently stops on day four is
+#: worse than no tunnel. A startup entry has no such limit, and the launcher restarts ssh in
+#: a loop, so a dropped connection is not an outage.
+STARTUP_DIR = (
+    Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+)
+TUNNEL_STARTUP = "csd-agent-tunnel.vbs"
+
+#: The tunnel keeper. `while True` around ssh is this platform's `Restart=always`; the pid
+#: file is how `uninstall` stops the one process Windows has no service manager for.
+TUNNEL_LAUNCHER = '''\
+"""Keep an SSH tunnel to the dashboard alive. Written by `csd-agent install`."""
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+home = Path(__file__).resolve().parent.parent
+state = home / "state"
+state.mkdir(parents=True, exist_ok=True)
+
+CMD = {command!r}
+CREATE_NO_WINDOW = 0x08000000
+
+
+def port_open() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", {tunnel_port}), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+# A second logon (RDP, fast user switching) must not start a keeper that fights the first
+# for the local port. If a tunnel is already up, the keeper that owns it is the right one.
+if port_open():
+    raise SystemExit(0)
+
+(state / "tunnel.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+try:
+    while True:
+        if port_open():
+            time.sleep(5)
+            continue
+        try:
+            subprocess.call(CMD, creationflags=CREATE_NO_WINDOW)
+        except OSError:
+            pass
+        # A tunnel that just failed (network down, server rebooting) is retried, not fatal.
+        time.sleep(5)
+finally:
+    try:
+        (state / "tunnel.pid").unlink()
+    except OSError:
+        pass
+'''
+
+#: Run by Task Scheduler through `pythonw.exe`, so no console appears every five minutes.
+#: It resolves the vendored package from its own location: a scheduled task starts with
+#: neither PYTHONPATH nor this package's directory, and baking paths here keeps the task
+#: definition free of environment variables. The token and base URL come from `~/.csd/env`
+#: inside `runtime.environment()`, exactly as they do for a hook.
+HEARTBEAT_LAUNCHER = '''\
+"""Run one CSD heartbeat with no console window. Written by `csd-agent install`."""
+import os
+import sys
+import traceback
+from pathlib import Path
+
+home = Path(__file__).resolve().parent.parent
+os.environ.setdefault("CSD_AGENT_HOME", str(home))
+sys.path.insert(0, str(home / "csd-agent"))
+
+try:
+    from csd_agent.cli import main
+    code = main(["heartbeat"])
+except Exception:
+    # A scheduled task has no terminal and no journal. Without this file a crash is silent,
+    # and "the host went stale" is the only symptom anyone would ever see.
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    with (home / "state" / "heartbeat.log").open("a", encoding="utf-8") as handle:
+        traceback.print_exc(file=handle)
+    code = 1
+raise SystemExit(code)
+'''
+
 TUNNEL_UNIT = """\
 [Unit]
 Description=CSD tunnel to the coding-session dashboard
@@ -71,6 +169,7 @@ ExecStart={ssh} -N \\
     -o ServerAliveCountMax=3 \\
     -o StrictHostKeyChecking=accept-new \\
     -i {key} \\
+    -p {cloud_ssh_port} \\
     -L {tunnel_port}:127.0.0.1:{cloud_port} \\
     {cloud_user}@{cloud_host}
 Restart=always
@@ -306,7 +405,26 @@ class Installer:
         return ""
 
     def _write_env(self) -> bool:
-        token = self.token or config.read_env().get("CSD_INGEST_TOKEN", "")
+        existing = config.read_env()
+        token = self.token or ""
+
+        # Order matters, and this one was learned the hard way: an explicit `--cloud` makes
+        # that host the authority for the credential. Reusing whatever was in the env file
+        # first kept a local dev token across a switch to a published dashboard, and every
+        # report answered 401 — which reads as "the token is broken", not "the token is from
+        # a different install".
+        if not token and self.cfg.cloud_host and self.cfg.cloud_host != "127.0.0.1":
+            token = self._fetch_token()
+            self.note("token fetched from the cloud over SSH" if token
+                      else "could not read the token from the cloud")
+        if not token and existing.get("CSD_BASE_URL", "").rstrip("/") == self.cfg.base_url:
+            token = existing.get("CSD_INGEST_TOKEN", "")
+            if token:
+                self.note("reusing the token already in the env file (same dashboard)")
+        elif not token and existing.get("CSD_INGEST_TOKEN"):
+            self.note(
+                f"old env pointed at {existing.get('CSD_BASE_URL')}; not reusing its token"
+            )
         if not token and self.cfg.local:
             token = self._read_local_token()
             self.note(
@@ -359,27 +477,38 @@ class Installer:
 
     # ------------------------------------------------------------------ #
     def _write_units(self) -> None:
+        if IS_WINDOWS:
+            self._write_windows_tasks()
+            return
+
         UNIT_DIR.mkdir(parents=True, exist_ok=True)
         cfg = self.cfg
+        # A direct URL needs no tunnel on any platform. `tunnel_deps` matters for the
+        # ordering only; with no tunnel unit, a `Wants=` for it would name a unit nobody
+        # wrote, and systemd tolerates that silently — which is exactly why it is removed
+        # here rather than left to be noticed by nobody.
+        direct = bool(cfg.direct_url)
         rendered = {
             "csd-heartbeat.service": HEARTBEAT_SERVICE.format(
                 home=config.agent_home(),
                 env=config.env_file(),
                 pkg=config.agent_home() / "csd-agent",
                 python=cfg.python,
-                tunnel_deps=LOCAL_DEPS if cfg.local else TUNNEL_DEPS,
+                tunnel_deps=LOCAL_DEPS if (cfg.local or direct) else TUNNEL_DEPS,
             ),
             "csd-heartbeat.timer": HEARTBEAT_TIMER.format(minutes=self.heartbeat_minutes),
         }
-        # No tunnel unit for a local install: the API is already on this machine's loopback,
-        # so an `ssh -L` to nowhere would be a unit whose only job is to fail and restart.
-        if not cfg.local:
+        # No tunnel unit for a local or direct install: in the first case the API is already
+        # on this machine's loopback, in the second it is already published. An `ssh -L` to
+        # nowhere would be a unit whose only job is to fail and restart.
+        if not cfg.local and not direct:
             rendered["csd-tunnel.service"] = TUNNEL_UNIT.format(
                 home=config.agent_home(),
                 ssh=shutil.which("ssh") or "/usr/bin/ssh",
                 key=os.path.expanduser(cfg.ssh_key),
                 tunnel_port=cfg.tunnel_port,
                 cloud_port=cfg.cloud_port,
+                cloud_ssh_port=cfg.cloud_ssh_port,
                 cloud_user=cfg.cloud_user,
                 cloud_host=cfg.cloud_host,
             )
@@ -388,7 +517,7 @@ class Installer:
             (UNIT_DIR / name).write_text(text, encoding="utf-8")
         self.note(f"units written to {UNIT_DIR} ({', '.join(sorted(rendered))})")
 
-        if cfg.local:
+        if cfg.local or direct:
             # A previous non-local install on this machine would have left a tunnel unit
             # behind, still holding a port and still dialling out. Remove it as part of
             # switching, rather than leaving two answers to "how does this host reach the
@@ -398,19 +527,126 @@ class Installer:
                 self._systemctl("disable", "--now", "csd-tunnel.service")
                 try:
                     stale.unlink()
-                    self.note("removed the leftover csd-tunnel.service (this install is local)")
+                    self.note("removed the leftover csd-tunnel.service "
+                              "(this install does not use a tunnel)")
                 except OSError:
                     pass
 
         if shutil.which("systemctl"):
             self._systemctl("daemon-reload")
-            units = ["csd-heartbeat.timer"] if cfg.local else [
+            units = ["csd-heartbeat.timer"] if (cfg.local or direct) else [
                 "csd-tunnel.service", "csd-heartbeat.timer",
             ]
             for unit in units:
                 self._systemctl("enable", "--now", unit)
         else:
             self.note("WARNING: no systemctl; units written but not started")
+
+    def _write_windows_tasks(self) -> None:
+        """Install the two long-lived things Windows needs, because there is no systemd.
+
+        A hook fires and exits; only these have to survive a reboot:
+
+        - **the tunnel**, unless the dashboard is reached directly (`--url`). It is a
+          long-running `ssh`, so it goes in the Startup folder rather than Task Scheduler —
+          a scheduled task is killed after 72 hours by default, and a tunnel that quietly
+          stops on day four is worse than no tunnel. The launcher restarts ssh in a loop.
+        - **the heartbeat**, a five-minute job, which Task Scheduler fits exactly.
+
+        `pythonw.exe` for both: a console window at logon and every five minutes is how a
+        background helper gets removed by the person it was installed for.
+        """
+        cfg = self.cfg
+        pythonw = Path(cfg.python).with_name("pythonw.exe")
+        if not pythonw.exists():
+            pythonw = Path(cfg.python)
+            self.note("note: pythonw.exe not found next to the interpreter; a console window")
+            self.note("      may appear for each scheduled run")
+
+        if cfg.direct_url:
+            self.note(f"no tunnel: reports go directly to {cfg.direct_url}")
+        elif not cfg.local:
+            self._write_windows_tunnel(pythonw)
+
+        launcher = config.bin_dir() / "csd-heartbeat.pyw"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text(HEARTBEAT_LAUNCHER, encoding="utf-8")
+        self.note(f"heartbeat launcher written to {launcher}")
+
+        command = f'"{pythonw.as_posix()}" "{launcher.as_posix()}"'
+        if self._schtasks(
+            "/Create", "/F", "/TN", HEARTBEAT_TASK,
+            "/SC", "MINUTE", "/MO", str(self.heartbeat_minutes),
+            "/TR", command,
+        ):
+            self.note(f"scheduled task {HEARTBEAT_TASK!r} every {self.heartbeat_minutes} min")
+        else:
+            self.note(f"WARNING: could not create scheduled task {HEARTBEAT_TASK!r}")
+            self.note("         create it by hand in Task Scheduler with the command above")
+
+    def _write_windows_tunnel(self, pythonw: Path) -> None:
+        """Write the tunnel keeper and arrange for it to start at logon."""
+        cfg = self.cfg
+        command = [
+            shutil.which("ssh") or "ssh", "-N",
+            "-o", "BatchMode=yes",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-i", Path(os.path.expanduser(cfg.ssh_key)).as_posix(),
+            "-p", str(cfg.cloud_ssh_port),
+            "-L", f"{cfg.tunnel_port}:127.0.0.1:{cfg.cloud_port}",
+            f"{cfg.cloud_user}@{cfg.cloud_host}",
+        ]
+        launcher = config.bin_dir() / "csd-tunnel.pyw"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text(
+            TUNNEL_LAUNCHER.format(command=command, tunnel_port=cfg.tunnel_port),
+            encoding="utf-8",
+        )
+        self.note(f"tunnel launcher written to {launcher}")
+
+        STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+        startup = STARTUP_DIR / TUNNEL_STARTUP
+        # A `.vbs` runner is the hidden one: a startup `.cmd` flashes a console at every
+        # logon, and the first thing a user does with a flashing helper is disable it.
+        startup.write_text(
+            'Set sh = CreateObject("WScript.Shell")\r\n'
+            f'sh.Run """{pythonw.as_posix()}"" ""{launcher.as_posix()}""", 0, False\r\n',
+            encoding="utf-8",
+        )
+        self.note(f"tunnel starts at logon: {startup}")
+
+        # Start it now, so verification and the first heartbeat have a tunnel. A re-install
+        # must not spawn a second keeper: it would fight the first for the local port, and
+        # the loser would restart forever.
+        if _port_open("127.0.0.1", cfg.tunnel_port):
+            self.note(f"tunnel already listening on 127.0.0.1:{cfg.tunnel_port}")
+            return
+        try:
+            subprocess.Popen(
+                [str(pythonw), str(launcher)],
+                creationflags=0x08000000,
+                close_fds=True,
+            )
+            self.note(f"tunnel starting on 127.0.0.1:{cfg.tunnel_port}")
+        except OSError as exc:
+            self.note(f"WARNING: could not start the tunnel ({exc}); log on again to start it")
+
+    def _schtasks(self, *args: str) -> bool:
+        """Run schtasks and turn a non-zero exit into a note, never an exception."""
+        try:
+            proc = subprocess.run(["schtasks", *args], capture_output=True, text=True)
+        except OSError as exc:
+            self.note(f"schtasks failed: {exc}")
+            return False
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            if detail:
+                self.note(detail.splitlines()[0][:200])
+            return False
+        return True
 
     def _systemctl(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["systemctl", "--user", *args],
@@ -461,7 +697,7 @@ class Installer:
                 "matcher": "",
                 "hooks": [{
                     "type": "command",
-                    "command": f"{HOOK_MARKER} {event}",
+                    "command": _hook_command(event),
                     "timeout": HOOK_TIMEOUT,
                 }],
             })
@@ -560,17 +796,40 @@ class Installer:
         else:
             self.note("loginctl not available; skipped the linger check")
 
-        if self.cfg.local:
-            self.note("csd-tunnel.service: not used (--local install)")
-        else:
-            state = self._systemctl("is-active", "csd-tunnel.service").stdout.strip()
-            self.note(f"csd-tunnel.service: {state}")
-            if state != "active":
+        if IS_WINDOWS:
+            # Task Scheduler is the equivalent of the timer. The tunnel check is a *port*
+            # check here: there is no unit to ask, and "is the near end open" is the only
+            # question that matters to every report the hooks will make.
+            scheduled = self._schtasks("/Query", "/TN", HEARTBEAT_TASK)
+            self.note(f"{HEARTBEAT_TASK}: {'scheduled' if scheduled else 'MISSING'}")
+            if not scheduled:
                 ok = False
-                self.note("         check: journalctl --user -u csd-tunnel -n 30")
 
-        timer = self._systemctl("is-active", "csd-heartbeat.timer").stdout.strip()
-        self.note(f"csd-heartbeat.timer: {timer}")
+            if self.cfg.direct_url:
+                self.note(f"tunnel: not used (direct {self.cfg.direct_url})")
+            elif self.cfg.local:
+                self.note("tunnel: not used (--local)")
+            else:
+                open_ = _port_open("127.0.0.1", self.cfg.tunnel_port)
+                self.note(f"tunnel: 127.0.0.1:{self.cfg.tunnel_port} "
+                          f"{'open' if open_ else 'NOT open'}")
+                if not open_:
+                    ok = False
+                    self.note("         the tunnel did not come up. Check:")
+                    self.note("           Task Manager for pythonw.exe (csd-tunnel.pyw)")
+                    self.note(f"           {config.state_dir()}/tunnel.pid")
+        else:
+            if self.cfg.local or self.cfg.direct_url:
+                self.note("csd-tunnel.service: not used (no tunnel in this install)")
+            else:
+                state = self._systemctl("is-active", "csd-tunnel.service").stdout.strip()
+                self.note(f"csd-tunnel.service: {state}")
+                if state != "active":
+                    ok = False
+                    self.note("         check: journalctl --user -u csd-tunnel -n 30")
+
+            timer = self._systemctl("is-active", "csd-heartbeat.timer").stdout.strip()
+            self.note(f"csd-heartbeat.timer: {timer}")
 
         # The only test that matters: can this host actually reach the API?
         #
@@ -580,14 +839,18 @@ class Installer:
         # than no check at all — it teaches you to ignore the line.
         curl = shutil.which("curl")
         if curl:
+            # `/dev/null` is not a filename on Windows, and `--noproxy` belongs on a loopback
+            # URL only: stripping the proxy from a published address breaks a host that needs
+            # one to reach the internet.
+            null = "NUL" if IS_WINDOWS else "/dev/null"
+            probe_args = [curl, "-s", "-o", null, "-w", "%{http_code}", "--max-time", "5"]
+            if config.is_loopback_url(self.cfg.base_url):
+                probe_args += ["--noproxy", "*"]
+            probe_args.append(f"{self.cfg.base_url}/api/sessions")
+
             code = "000"
             for attempt in range(10):
-                probe = subprocess.run(
-                    [curl, "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                     "--noproxy", "*", "--max-time", "5",
-                     f"{self.cfg.base_url}/api/sessions"],
-                    capture_output=True, text=True,
-                )
+                probe = subprocess.run(probe_args, capture_output=True, text=True)
                 code = probe.stdout.strip() or "000"
                 if code in ("200", "401"):
                     break
@@ -596,7 +859,10 @@ class Installer:
             self.note(f"GET {self.cfg.base_url}/api/sessions -> {code}")
             if code not in ("200", "401"):
                 ok = False
-                if self.cfg.local:
+                if self.cfg.direct_url:
+                    self.note(f"         {self.cfg.base_url} did not answer from this machine.")
+                    self.note("         Check the address from a browser on this host.")
+                elif self.cfg.local:
                     self.note("         the dashboard is not answering on this machine. Check:")
                     self.note("           systemctl --user status csd-heartbeat.service")
                 else:
@@ -666,11 +932,22 @@ class Installer:
             self.note("pi reporter: not present (Pi not installed here)")
 
         self.note("")
-        where = "journalctl --user -u csd-heartbeat" if self.cfg.local else (
-            "journalctl --user -u csd-tunnel"
-        )
+        if IS_WINDOWS:
+            where = f"Task Scheduler ({HEARTBEAT_TASK}) and {config.state_dir()}/heartbeat.log"
+        elif self.cfg.local or self.cfg.direct_url:
+            where = "journalctl --user -u csd-heartbeat"
+        else:
+            where = "journalctl --user -u csd-tunnel"
         self.note(f"Done. Logs: {config.state_dir()}/hook.log, and {where}")
         return 0 if ok else 1
+
+
+def _port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
 
 
 def _current_user() -> str:
@@ -690,6 +967,20 @@ def _current_user() -> str:
         return str(os.getuid())
 
 
+def _hook_command(event: str) -> str:
+    """The command Claude Code runs for one event.
+
+    On POSIX the wrapper is executable and carries a shebang, so its path is the command.
+    Windows has no shebang and Claude Code's hook shell is not necessarily bash, so the
+    wrapper is invoked explicitly. Forward slashes because the program receiving this path
+    is bash, not cmd — and because the same string is what `_is_ours` must recognise on a
+    re-install.
+    """
+    if IS_WINDOWS:
+        return f'bash "{Path(HOOK_MARKER).as_posix()}" {event}'
+    return f"{HOOK_MARKER} {event}"
+
+
 def _is_ours(group: object) -> bool:
     """Is this hook matcher-group one that a previous install wrote?"""
     if not isinstance(group, dict):
@@ -697,10 +988,37 @@ def _is_ours(group: object) -> bool:
     entries = group.get("hooks")
     if not isinstance(entries, list):
         return False
+    # Compare with separators normalised: the Windows command carries forward slashes while
+    # the marker was built from a Path with backslashes. Without this, re-install appends a
+    # second entry and uninstall cannot remove either.
+    marker = HOOK_MARKER.replace("\\", "/")
     for entry in entries:
-        if isinstance(entry, dict) and HOOK_MARKER in str(entry.get("command", "")):
+        if not isinstance(entry, dict):
+            continue
+        command = str(entry.get("command", "")).replace("\\", "/")
+        if marker in command:
             return True
     return False
+
+
+def _stop_windows_tunnel() -> None:
+    """Kill the tunnel keeper and its ssh child, if one is recorded.
+
+    `/T` is load-bearing: the launcher's child is ssh, and killing only the parent leaves the
+    local port held and the tunnel half-alive. A missing pid file is a no-op — the process
+    may already be gone, and uninstall must stay re-runnable.
+    """
+    path = config.state_dir() / "tunnel.pid"
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                   capture_output=True, text=True)
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def uninstall() -> int:
@@ -748,16 +1066,28 @@ def uninstall() -> int:
         print("\n== Pi")
         pi.uninstall(home=pi_home, label=cfg.label if cfg else None)
 
-    for unit in ("csd-heartbeat.timer", "csd-heartbeat.service", "csd-tunnel.service"):
-        subprocess.run(["systemctl", "--user", "disable", "--now", unit],
-                       capture_output=True, text=True)
-
-    for name in ("csd-tunnel.service", "csd-heartbeat.service", "csd-heartbeat.timer"):
+    if IS_WINDOWS:
+        # Task Scheduler has no "disable and remove"; deleting the task is both. A task that
+        # does not exist makes this a no-op, which is what makes uninstall re-runnable.
+        _stop_windows_tunnel()
         try:
-            (UNIT_DIR / name).unlink()
+            (STARTUP_DIR / TUNNEL_STARTUP).unlink()
         except OSError:
             pass
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", HEARTBEAT_TASK],
+                       capture_output=True, text=True)
+    else:
+        for unit in ("csd-heartbeat.timer", "csd-heartbeat.service", "csd-tunnel.service"):
+            subprocess.run(["systemctl", "--user", "disable", "--now", unit],
+                           capture_output=True, text=True)
+
+        for name in ("csd-tunnel.service", "csd-heartbeat.service", "csd-heartbeat.timer"):
+            try:
+                (UNIT_DIR / name).unlink()
+            except OSError:
+                pass
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       capture_output=True, text=True)
 
     if SETTINGS.exists():
         try:

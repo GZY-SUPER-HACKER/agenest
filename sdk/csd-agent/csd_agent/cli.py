@@ -1,20 +1,33 @@
 """Command line for `csd-agent`.
 
-Four verbs, each a short-lived process. There is no daemon: the only things that stay
-running are the two systemd user units the installer writes, and those run `ssh` and a
-timer — not code from this package.
+Four verbs, each a short-lived process. There is no daemon: on Linux the only things that
+stay running are the two systemd user units the installer writes, and those run `ssh` and a
+timer — not code from this package. On Windows they are a Startup entry and a task.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from . import config, dsh, heartbeat, hooks, host, install, pi
+
+
+def _default_python() -> str:
+    """The interpreter the connector will spawn for every hook.
+
+    On Windows there is no `python3` alias, and a bare `python` resolves differently under
+    Claude Code's environment than under the shell that ran the installer (the dev venv is
+    on one PATH and not the other). Baking the installer's own interpreter keeps the hook,
+    the wrapper and the heartbeat on the same one. Forward slashes because bash reads the
+    wrapper — the program receiving the path, not cmd.
+    """
+    return Path(sys.executable).as_posix() if os.name == "nt" else "python3"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -27,6 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ins = sub.add_parser("install", help="one-time setup on this machine")
     ins.add_argument("--cloud", default=None,
                      help="dashboard host, e.g. dashboard.example.com. Not needed with --local.")
+    ins.add_argument("--url", default=None,
+                     help="dashboard URL this host can reach directly, e.g. "
+                          "https://csd.tailxxxx.ts.net. Skips the tunnel entirely; on a "
+                          "platform with no systemd (Windows) it is the only remote shape.")
     ins.add_argument("--local", action="store_true",
                      help="this machine runs the dashboard itself, so there is nothing to "
                           "tunnel to: no csd-tunnel.service, and the API is on loopback")
@@ -36,8 +53,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="the dashboard's port on the cloud (default 8780)")
     ins.add_argument("--tunnel-port", type=int, default=18781,
                      help="local port the tunnel listens on (default 18781)")
-    ins.add_argument("--python", default="python3",
-                     help="interpreter for cpctl and csd-agent (default python3)")
+    ins.add_argument("--python", default=_default_python(),
+                     help="interpreter for cpctl and csd-agent (default: python3, or the "
+                          "interpreter running this installer on Windows)")
     ins.add_argument("--ssh-key", default="~/.ssh/id_ed25519",
                      help="key used for the tunnel and to fetch the token")
     ins.add_argument("--label", default=None, help="name for this host (default: hostname)")
@@ -121,18 +139,29 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(json.dumps(vars(args), indent=2, ensure_ascii=False))
         return 0
 
-    if not args.local and not args.cloud:
+    if args.local and args.url:
+        print(
+            "csd-agent: --local and --url are two different answers to \"how does this host\n"
+            "  reach the dashboard\". Use --local when the dashboard runs on this machine;\n"
+            "  use --url when it is published somewhere this machine can reach.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.local and not args.cloud and not args.url:
         print(
             "csd-agent: say which dashboard this host reports to —\n"
             "  --cloud <host>   a dashboard on another machine (this host tunnels to it)\n"
+            "  --url <url>      a dashboard this host can reach directly (no tunnel)\n"
             "  --local          the dashboard runs ON this machine (nothing to tunnel to)",
             file=sys.stderr,
         )
         return 2
 
     cfg = config.AgentConfig(
-        # Unused when local, and never read then: `base_url` picks the dashboard's own port.
-        # Left non-empty so a config file written by an older version stays loadable.
+        # Unused when local or direct, and never read then: `base_url` prefers direct_url,
+        # then picks the dashboard's own port for local. Left non-empty so a config file
+        # written by an older version stays loadable.
         cloud_host=args.cloud or "127.0.0.1",
         cloud_user=args.cloud_user,
         cloud_ssh_port=args.cloud_ssh_port,
@@ -142,6 +171,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         ssh_key=args.ssh_key,
         label=args.label or "",
         local=args.local,
+        direct_url=(args.url or "").rstrip("/"),
     )
     if not cfg.label:
         import socket
@@ -179,7 +209,9 @@ def _cmd_status(_args: argparse.Namespace) -> int:
 
     print(f"agent home : {config.agent_home()}")
     print(f"label      : {cfg.label}")
-    if cfg.local:
+    if cfg.direct_url:
+        print(f"dashboard  : {cfg.base_url} (direct, no tunnel)")
+    elif cfg.local:
         print(f"dashboard  : this machine (local install, {cfg.base_url})")
     else:
         print(f"cloud      : {cfg.cloud_user}@{cfg.cloud_host}:{cfg.cloud_ssh_port}"
@@ -224,13 +256,25 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         print(f"pi         : {pi_home} — extension not installed")
 
     if shutil.which("systemctl"):
-        units = ["csd-heartbeat.timer"] if cfg.local else [
+        units = ["csd-heartbeat.timer"] if cfg.local or cfg.direct_url else [
             "csd-tunnel.service", "csd-heartbeat.timer",
         ]
         for unit in units:
             proc = subprocess.run(["systemctl", "--user", "is-active", unit],
                                   capture_output=True, text=True)
             print(f"{unit:<24}: {proc.stdout.strip()}")
+    elif os.name == "nt":
+        # Task Scheduler is this platform's systemd. A missing task is the difference
+        # between "reports until you log out" and "reports after a reboot", so it is worth
+        # a line in the one output a person reads when asking whether the host connected.
+        proc = subprocess.run(["schtasks", "/Query", "/TN", install.HEARTBEAT_TASK],
+                              capture_output=True, text=True)
+        print(f"{install.HEARTBEAT_TASK:<24}: "
+              f"{'scheduled' if proc.returncode == 0 else 'MISSING'}")
+        if not cfg.direct_url and not cfg.local:
+            open_ = install._port_open("127.0.0.1", cfg.tunnel_port)
+            print(f"{'tunnel':<24}: 127.0.0.1:{cfg.tunnel_port} "
+                  f"{'open' if open_ else 'NOT open'}")
 
     entries = tracked_entries()
     print(f"tracked    : {len(entries)} session(s)")
@@ -240,11 +284,15 @@ def _cmd_status(_args: argparse.Namespace) -> int:
               f"  pid={entry.pid}  {entry.cwd}")
 
     if shutil.which("curl"):
-        proc = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--noproxy", "*",
-             "--max-time", "8", f"{cfg.base_url}/api/sessions"],
-            capture_output=True, text=True,
-        )
+        # `/dev/null` is not a filename on Windows, and `--noproxy` only belongs on a
+        # loopback URL — stripping the proxy from a published address breaks the hosts that
+        # need one to reach the internet at all.
+        null = "NUL" if os.name == "nt" else "/dev/null"
+        args = ["curl", "-s", "-o", null, "-w", "%{http_code}", "--max-time", "8"]
+        if config.is_loopback_url(cfg.base_url):
+            args += ["--noproxy", "*"]
+        args.append(f"{cfg.base_url}/api/sessions")
+        proc = subprocess.run(args, capture_output=True, text=True)
         print(f"reachable  : HTTP {proc.stdout.strip()} from {cfg.base_url}/api/sessions")
     return 0
 

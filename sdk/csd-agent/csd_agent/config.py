@@ -16,9 +16,10 @@ Layout:
         tracked.json which CC sessions this host believes are live
         *.id         cpctl's own per-directory session cache
 
-Nothing here is a daemon. Every command is a short-lived process; the only long-lived
-things are the two systemd user units the installer writes, and those run `ssh` and a
-timer — not code of ours.
+Nothing here is a daemon. Every command is a short-lived process; on Linux the only
+long-lived things are the two systemd user units the installer writes, and those run `ssh`
+and a timer — not code of ours. On Windows the equivalents are a Startup entry supervising
+`ssh` and a Task Scheduler task.
 """
 
 from __future__ import annotations
@@ -32,6 +33,17 @@ from pathlib import Path
 
 def agent_home() -> Path:
     return Path(os.environ.get("CSD_AGENT_HOME") or (Path.home() / ".csd"))
+
+
+def is_loopback_url(url: str) -> bool:
+    """Is this URL on this machine? The proxy rules differ, so the caller needs to know.
+
+    Loopback must bypass the system proxy: urllib honours `http_proxy` for 127.0.0.1 too,
+    and a proxy that answers a tunnel request looks exactly like "the dashboard is down".
+    A published URL (Tailscale Funnel, for instance) must *not* be stripped of the proxy:
+    a machine that needs one to reach the internet would otherwise stop reporting.
+    """
+    return url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
 
 
 def env_file() -> Path:
@@ -80,6 +92,12 @@ class AgentConfig:
     #: `127.0.0.1`, because what differs is which units get written — and a remote host could
     #: legitimately address its dashboard over loopback through some other arrangement.
     local: bool = False
+    #: A dashboard URL this host can reach directly — typically a Tailscale Funnel or Serve
+    #: address. When set there is nothing to tunnel to: every report goes straight to this
+    #: URL and the installer writes no tunnel unit. This is the only remote shape that works
+    #: on a platform without systemd (Windows), because a hook is a short-lived process and
+    #: needs no daemon — the heartbeat is the only thing that still needs a scheduler.
+    direct_url: str = ""
     #: Whether this host declares itself driveable by the dashboard's personal agent
     #: (docs/design.md §24). On by default: the declaration is a *request* that puts a prompt in
     #: front of the user, and a machine that never asks can never be approved. `--no-drive`
@@ -104,8 +122,14 @@ class AgentConfig:
 
     @property
     def base_url(self) -> str:
-        """Where the API is, from this host. Local talks to the dashboard's own port; a
-        remote host talks to the near end of the tunnel."""
+        """Where the API is, from this host.
+
+        A direct URL wins: the dashboard is already published at an address this host can
+        reach, so nothing needs forwarding. Otherwise local talks to the dashboard's own
+        port and a remote host talks to the near end of the tunnel.
+        """
+        if self.direct_url:
+            return self.direct_url.rstrip("/")
         port = self.cloud_port if self.local else self.tunnel_port
         return f"http://127.0.0.1:{port}"
 
