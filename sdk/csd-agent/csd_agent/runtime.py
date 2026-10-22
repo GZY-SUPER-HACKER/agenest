@@ -26,6 +26,13 @@ from . import config
 #: interpreter itself will not start — without it a hook could hang Claude Code.
 SUBPROCESS_TIMEOUT = 25.0
 
+#: A console program started by a *windowless* parent gets a new console window of its own.
+#: The Windows heartbeat runs under `pythonw.exe` precisely so nothing flashes (§32), and a
+#: `cpctl` invoked without this put the window right back: a black box every five minutes,
+#: for the length of one report. Under a hook the parent already owns a console, so this
+#: removes an artefact rather than hiding output. Spread into every `subprocess.run` here.
+NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
+
 
 @dataclass
 class Result:
@@ -85,6 +92,7 @@ def cpctl(*args: str) -> Result:
             timeout=SUBPROCESS_TIMEOUT,
             env=environment(),
             cwd=str(config.agent_home()),
+            **NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return Result(False, detail=f"cpctl {' '.join(args[:2])} timed out")

@@ -152,7 +152,8 @@ def _tailscale_ip() -> str:
         return ""
     try:
         proc = subprocess.run(
-            [executable, "ip", "-4"], capture_output=True, text=True, timeout=5
+            [executable, "ip", "-4"], capture_output=True, text=True, timeout=5,
+            **runtime.NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
