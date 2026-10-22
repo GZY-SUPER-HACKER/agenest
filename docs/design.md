@@ -1845,3 +1845,44 @@ argument §28 makes against a hook bridge.
 Rejected: **reporting `awaiting_user`.** Pi has no standard approval or permission event. A tool
 name is not a request for a human, and inferring one would be the one thing this dashboard
 refuses to do.
+
+## 32. The connector meets the platform it is on
+
+`csd-agent` was written for a Linux agent host: hooks in `~/.claude/settings.json`, an
+`ssh -L` tunnel under systemd (`Restart=always`), and a five-minute heartbeat under a systemd
+timer. A Windows host has none of those, and the first version still wrote the units and
+printed `WARNING: no systemctl; units written but not started` — a connector that installed
+cleanly and reported nothing.
+
+**A hook needs no daemon.** The integration is not the hook: the hook is a short-lived process
+that calls `cpctl`, and it works exactly as well on Windows once the command is runnable. What
+must survive a reboot is the transport and the probe, and those are two platform questions:
+
+- **Transport.** The supported Windows shape is a tunnel keeper in the user's Startup folder
+  (`pythonw` around a loop of `ssh -N`), because it has no 72-hour execution limit and needs
+  no admin. `--url` is the alternative for a dashboard that is already published and removes
+  the tunnel entirely. It is not the default because a public HTTPS handshake can exceed the
+  hook wrapper's 2-second budget, and a hook that blocks every prompt is worse than one that
+  reports nothing.
+- **Probe.** Task Scheduler, every five minutes, running a `pythonw` launcher that resolves
+  the vendored package from its own path. A task created for the current user needs no admin.
+
+**Two Windows hazards are guarded, not documented away.** `os.kill(pid, 0)` is a probe on
+POSIX but a `TerminateProcess` call on Windows; a liveness check written with it would kill
+the session it asked about, so `tracked.process_alive` uses `OpenProcess` +
+`GetExitCodeProcess` there. And a hook's parent chain can break when a launcher exits — Windows
+does not reparent — so pid discovery falls back to the only `claude.exe` on the machine and
+returns "unknown" when there is more than one. The heartbeat already treats unknown as "cannot
+judge", which is the honest answer.
+
+**A credential belongs to one dashboard.** The installer used to prefer whatever token was
+already in `~/.csd/env`, so switching from a local install to a cloud one kept the local dev
+token and every report answered 401. An explicit `--cloud` now makes that host the authority,
+and an existing token is reused only when its base URL names the same dashboard.
+
+Rejected: **a Windows service.** Admin rights, an installer and a service manager for a
+process whose whole job is to keep one `ssh` alive — the Startup folder does that with a file
+the user can see and delete. Rejected: **requiring WSL.** The coding agent runs on Windows;
+making its host connector depend on a second Linux is a worse answer than teaching the
+connector two platform primitives.
+

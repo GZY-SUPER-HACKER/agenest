@@ -55,11 +55,15 @@ def environment() -> dict[str, str]:
     # cpctl runs on urllib, which honours http_proxy for *every* URL including 127.0.0.1.
     # On a host behind an egress proxy the tunnel is then routed to the proxy and dies —
     # and the failure looks like "the dashboard is down", not "the proxy ate loopback".
-    env["no_proxy"] = "127.0.0.1,localhost"
-    env["NO_PROXY"] = "127.0.0.1,localhost"
-    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                "all_proxy"):
-        env.pop(var, None)
+    #
+    # Only loopback gets this treatment. A `--url` install talks to a published address, and
+    # a machine that needs its proxy to reach the internet must keep it (Design §32).
+    if config.is_loopback_url(env["CSD_BASE_URL"]):
+        env["no_proxy"] = "127.0.0.1,localhost"
+        env["NO_PROXY"] = "127.0.0.1,localhost"
+        for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "all_proxy"):
+            env.pop(var, None)
     return env
 
 

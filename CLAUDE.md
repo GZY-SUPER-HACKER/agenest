@@ -244,6 +244,15 @@ of your problems.
   itself. The install is **one copied file** under `~/.pi/agent/extensions/` (global only — the
   project-local directory is trust-gated), and uninstall deletes only a file carrying the
   reporter's marker. Diagnostics go to stderr because in `pi --print` stdout is the answer (§31).
+- **`csd-agent install` writes the long-lived pieces *the platform has*, not systemd's.** Linux:
+  the two systemd user units. Windows: a Startup-folder keeper that supervises `ssh` (a
+  scheduled task is killed after 72 h, which is how a tunnel silently stops on day four) and a
+  Task Scheduler heartbeat every five minutes (§32). Two Windows hazards are guarded in
+  `tracked.py`: `os.kill(pid, 0)` *terminates* the process on Windows, so liveness uses
+  `OpenProcess`, and pid discovery falls back to the only `claude.exe` — returning "unknown"
+  when there is more than one rather than guessing. `--url` installs skip the tunnel for a
+  dashboard that is already published; it is not the default, because a public TLS handshake can
+  exceed the hook wrapper's 2 s budget.
 
 ### The credentials, and why their defaults differ
 
