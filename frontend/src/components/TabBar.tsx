@@ -17,8 +17,8 @@ export type AppTab = "dashboard" | "agent";
 interface Props {
   active: AppTab;
   onSelect: (tab: AppTab) => void;
-  /** A dot on the agent tab when a run is in flight and you are looking at the dashboard. */
-  agentBusy?: boolean;
+  /** A dot on the agent tab when it has said something you have not looked at yet. */
+  agentUnread?: boolean;
 }
 
 const TABS: { id: AppTab; label: string; Icon: typeof IconBoard }[] = [
@@ -26,7 +26,7 @@ const TABS: { id: AppTab; label: string; Icon: typeof IconBoard }[] = [
   { id: "agent", label: "Agent", Icon: IconChat },
 ];
 
-export function TabBar({ active, onSelect, agentBusy = false }: Props) {
+export function TabBar({ active, onSelect, agentUnread = false }: Props) {
   return (
     <nav className="tabbar" role="tablist" aria-label="Main">
       {TABS.map(({ id, label, Icon }) => (
@@ -36,11 +36,12 @@ export function TabBar({ active, onSelect, agentBusy = false }: Props) {
           aria-selected={active === id}
           className="tabbar__tab"
           data-active={active === id}
+          aria-label={id === "agent" && agentUnread ? "Agent, unread message" : label}
           onClick={() => onSelect(id)}
         >
           <span className="tabbar__icon">
             <Icon size={20} />
-            {id === "agent" && agentBusy && active !== "agent" && (
+            {id === "agent" && agentUnread && active !== "agent" && (
               <span className="tabbar__dot" aria-hidden="true" />
             )}
           </span>

@@ -482,6 +482,12 @@ Distilled from Telegram iOS, and the interaction rules are load-bearing rather t
   conversation drawer and the settings row that switched between them were all removed. The page
   calls `POST /api/agent/session` on boot — idempotent, backend-scoped — rather than tracking an
   id of its own.
+- **The tab's dot means unread, not busy.** It is set by an assistant message arriving while the
+  dashboard is on screen, and cleared by looking at the agent page. A dot for "a run is in
+  flight" is on for the whole run and says nothing the page itself does not (§33).
+- **Send never becomes Stop.** While a turn is running the send button queues the message and a
+  second button stops the turn; the queue is per conversation, persisted, released one message
+  per settled turn — so Stop releases it rather than discarding it (§33).
 - **No clock on a bubble; time lives in a separator.** A centred line above a message says when
   the conversation resumed: the date (plus time) at the start, the date across days, the time
   after more than five minutes of silence (a real elapsed-time comparison), nothing otherwise.

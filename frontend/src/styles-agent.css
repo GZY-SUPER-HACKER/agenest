@@ -874,6 +874,63 @@
   font-size: 12px;
 }
 
+/* Messages typed while the agent is working (design.md §33). Above the pill for the same
+   reason the pending files are: removing one is its own tap, not an edit of the message being
+   composed. Dashed, because nothing here has reached the agent yet. */
+.tgcompose__queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.queued {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 5px 5px 5px 9px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.queued__tag {
+  flex: 0 0 auto;
+  color: var(--ink-4);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.queued__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued__x {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: var(--ink-3);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.queued__x:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+
 .filechip {
   display: inline-flex;
   align-items: center;

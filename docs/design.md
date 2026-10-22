@@ -1895,3 +1895,51 @@ the user can see and delete. Rejected: **requiring WSL.** The coding agent runs 
 making its host connector depend on a second Linux is a worse answer than teaching the
 connector two platform primitives.
 
+## 33. A message can be queued, and the dot means unread
+
+Two things were wrong with the agent page once a run took more than a few seconds.
+
+**The tab's dot meant "a run is in flight".** That is on for the entire turn, whether the agent
+is thinking, running a tool, or writing an answer, so it tells the reader nothing they cannot
+see by looking at the page — and it stays lit after the answer lands, until you go and look.
+A dot is a *message* indicator everywhere else the user has ever seen one, so this one now
+means exactly that: an assistant message arrived while the dashboard was on screen. Looking at
+the agent page clears it. A tool row does not set it (that is machinery, not prose); a
+checkpoint does (that is the agent addressing the reader, §23). It is reported up from
+`AgentPage` because the page stays mounted while hidden — the stream keeps arriving, which is
+the only reason the tab can know at all.
+
+**Send became Stop while the agent worked**, so there was no way to say the next thing without
+cancelling the answer being written. The composer now keeps both: send stays send, and a stop
+button sits beside it. Typing into a busy agent queues the message.
+
+The queue is **the page's**, not the service's, and that is deliberate:
+
+- It is one conversation per agent and one reader in practice; a server-side queue would need a
+  new wire field for "not sent yet", a second identity for a message the agent has no record
+  of, and a reconciliation rule for when its real id appears. The page already knows which of
+  its own messages have been posted.
+- The message is **not posted** until the turn settles. Posting it early looks tempting — the
+  native backend already has Pi's `follow_up` — but `follow_up` does not echo until Pi begins
+  the next turn, so `send` would either block the request for the length of the current answer
+  or return no id, and a no-id message is one the page cannot tell apart from history's copy
+  later. Queueing here keeps every sent message carrying the agent's own id, which is the rule
+  the whole transcript rests on.
+- One message per turn, not the whole queue at once: two replies written concurrently would
+  interleave. The release condition is the same status frame that ends the turn, so **Stop
+  releases the queue** — that is the interruption behaviour, and the reason Stop does not clear
+  it.
+
+The queue is keyed by conversation and persisted to `localStorage` (`csd.agent-queue`), so a
+reload does not silently drop what someone typed, and switching agents shows each agent's own
+queue. It is released only after the conversation's streaming state has been read from the
+server (`ready`), because a reload during a run would otherwise post into a live turn — the
+exact behaviour the queue exists to avoid. Attachments are uploaded when the message is
+queued, not when it is sent: a send the user has committed to must not lose its files to a page
+close, and an attachment id is the only part of a queued message that survives a reload. Removing
+a queued message deletes those uploads, since unlike a transport failure nothing will ever name
+them.
+
+Rejected: **disabling the composer while busy.** It is the simplest implementation and the one
+that reads as a broken app — the user's next sentence is exactly what they are composing while
+watching the answer arrive.
