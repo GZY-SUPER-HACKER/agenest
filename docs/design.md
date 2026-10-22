@@ -1867,6 +1867,15 @@ must survive a reboot is the transport and the probe, and those are two platform
 - **Probe.** Task Scheduler, every five minutes, running a `pythonw` launcher that resolves
   the vendored package from its own path. A task created for the current user needs no admin.
 
+**A windowless parent does not make its children windowless — the flag has to be passed.**
+`pythonw` suppresses its own console and nothing else: a console program it starts
+(`python.exe -m cpctl`, `tailscale ip`) is given a brand-new console window. So the probe was
+correct and invisible in every log while a black box flashed on screen every five minutes for
+the length of one report. Every spawn on that path carries `creationflags=CREATE_NO_WINDOW` on
+Windows (`runtime.NO_WINDOW`, spread into the call); under a hook the parent already owns a
+console, so the flag only ever removes an artefact. A new subprocess added to the heartbeat
+needs the same, or the flashing comes back.
+
 **Two Windows hazards are guarded, not documented away.** `os.kill(pid, 0)` is a probe on
 POSIX but a `TerminateProcess` call on Windows; a liveness check written with it would kill
 the session it asked about, so `tracked.process_alive` uses `OpenProcess` +
