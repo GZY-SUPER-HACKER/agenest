@@ -67,10 +67,10 @@ const FRESH_MS = 6000;
 type StatusFilter = "all" | "running" | "failed" | "done";
 
 const FILTERS: Array<{ key: StatusFilter; label: string }> = [
-  { key: "all", label: "All" },
   { key: "running", label: "Running" },
-  { key: "failed", label: "Failed" },
   { key: "done", label: "Done" },
+  { key: "failed", label: "Failed" },
+  { key: "all", label: "All" },
 ];
 
 function matchesFilter(session: Session, filter: StatusFilter): boolean {
@@ -101,7 +101,7 @@ export function Rail({
   onSelect: (id: string) => void;
   onCollapse: () => void;
 }) {
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  const [filter, setFilter] = useState<StatusFilter>("running");
   const [collapsed, setCollapsed] = useState<Collapsed>(loadCollapsed);
 
   const visible = useMemo(
