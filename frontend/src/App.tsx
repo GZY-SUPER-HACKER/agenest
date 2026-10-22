@@ -77,10 +77,11 @@ export default function App() {
   // reason: the toggle's label and icon must describe what is on screen *now*. Reading
   // `matchMedia` during render would give a value that never updates when the OS flips.
   const [system, setSystem] = useState<Theme>(systemTheme);
-  // Reported up by the agent page. It keeps its stream open while you are looking at the
-  // dashboard, so a run started on that tab keeps arriving — and this is what lets the tab
-  // say so without you having to switch to it and find out.
-  const [agentBusy, setAgentBusy] = useState(false);
+  // Reported up by the agent page: it has a reply the user has not looked at. It keeps its
+  // stream open while you are looking at the dashboard, so this is what lets the tab say
+  // "there is something to read" — not "a run is in flight", which was on for the whole run
+  // and therefore told the user nothing (design.md §33).
+  const [agentUnread, setAgentUnread] = useState(false);
   const { sessions, hosts, loading, error, reload, connection } = useSessions({ limit: 300 });
 
   const view: AppTab = route.name === "agent" ? "agent" : "dashboard";
@@ -282,7 +283,8 @@ export default function App() {
         */}
         <div className="pane pane--agent" hidden={view !== "agent"}>
           <AgentPage
-            onBusyChange={setAgentBusy}
+            visible={view === "agent"}
+            onUnreadChange={setAgentUnread}
             theme={showing}
             onTheme={chooseTheme}
             settingsOpen={settingsOpen}
@@ -291,7 +293,7 @@ export default function App() {
           />
         </div>
 
-        <TabBar active={view} onSelect={selectTab} agentBusy={agentBusy} />
+        <TabBar active={view} onSelect={selectTab} agentUnread={agentUnread} />
       </div>
     </div>
   );

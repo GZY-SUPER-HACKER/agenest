@@ -10,8 +10,10 @@
  *   resumes after a pause, or when it moves to another day.
  * - Consecutive messages from the same side get tighter spacing and only the outer corners
  *   of the group are rounded, so a burst reads as one utterance.
- * - The composer is a single pill that grows with the text, with a circular send button that
- *   becomes a stop button while the agent is working.
+ * - The composer is a single pill that grows with the text. Send never disappears: while the
+ *   agent is working it queues the message instead, and a second button stops the current turn
+ *   (design.md §33). Replacing send with stop — which is what this used to do — meant a turn
+ *   could not be added to without cancelling it first.
  * - Date separators, because a conversation that spans days is unreadable without them.
  *
  * What is *not* copied: Telegram's delivery ticks, read receipts and avatars. Those all mean
@@ -108,6 +110,80 @@ interface PendingFile {
 /** The server's per-message cap (`AgentMessageCreate.attachment_ids`). */
 const MAX_ATTACHMENTS = 10;
 
+/**
+ * A message typed while the agent was working, waiting for the turn to end (design.md §33).
+ *
+ * It is the page's own state, not the agent's: nothing has been sent, so the agent has no
+ * record of it and no id to give it. `key` is local and only has to be stable within this
+ * list. Attachments are uploaded the moment the message is queued — a send the user has
+ * committed to cannot be left un-uploaded, or closing the page would silently drop the file.
+ */
+interface QueuedMessage {
+  key: string;
+  content: string;
+  attachmentIds: string[];
+  /** File names, so a reloaded page can still say what a queued message will carry. */
+  names: string[];
+}
+
+/** Queue per conversation: the queue belongs to the agent the words were addressed to. */
+const QUEUE_KEY = "csd.agent-queue";
+
+type StoredQueues = Record<string, QueuedMessage[]>;
+
+function readQueues(): StoredQueues {
+  try {
+    const raw = window.localStorage.getItem(QUEUE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as StoredQueues;
+  } catch {
+    // Unparseable is the same as empty: a queue is a convenience, never the record.
+    return {};
+  }
+}
+
+function readQueue(threadId: string | null): QueuedMessage[] {
+  if (!threadId) return [];
+  const raw: unknown = readQueues()[threadId];
+  const stored: unknown[] = Array.isArray(raw) ? raw : [];
+  // Rebuilt field by field rather than trusted wholesale: this is storage an older build may
+  // have written, and one malformed entry must not take the composer down with it.
+  return stored.flatMap((entry) => {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      typeof (entry as QueuedMessage).key !== "string" ||
+      typeof (entry as QueuedMessage).content !== "string" ||
+      !Array.isArray((entry as QueuedMessage).attachmentIds) ||
+      !Array.isArray((entry as QueuedMessage).names)
+    ) {
+      return [];
+    }
+    const { key, content, attachmentIds, names } = entry as QueuedMessage;
+    return [
+      {
+        key,
+        content,
+        attachmentIds: attachmentIds.filter((id): id is string => typeof id === "string"),
+        names: names.filter((name): name is string => typeof name === "string"),
+      },
+    ];
+  });
+}
+
+function writeQueue(threadId: string, items: QueuedMessage[]): void {
+  try {
+    const all = readQueues();
+    if (items.length > 0) all[threadId] = items;
+    else delete all[threadId];
+    window.localStorage.setItem(QUEUE_KEY, JSON.stringify(all));
+  } catch {
+    /* not persisting is fine; the queue still works for this session */
+  }
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -169,14 +245,18 @@ export function backendLabel(name: string): string {
 }
 
 export function AgentPage({
-  onBusyChange,
+  visible,
+  onUnreadChange,
   theme,
   onTheme,
   settingsOpen,
   onOpenSettings,
   onCloseSettings,
 }: {
-  onBusyChange?: (busy: boolean) => void;
+  /** Whether this page is the one on screen. Owned by App, which owns the tab bar. */
+  visible: boolean;
+  /** A reply the user has not seen. Drives the tab's dot; never "the agent is working". */
+  onUnreadChange?: (unread: boolean) => void;
   /** Owned by App: the theme governs both pages, so it is not this page's to hold. */
   theme: Theme;
   onTheme: (theme: Theme) => void;
@@ -206,9 +286,16 @@ export function AgentPage({
   const [pending, setPending] = useState<PendingFile[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  // The state above drives the button; this drives the guard. A second Enter can arrive before
-  // React has re-rendered with `uploading=true`, and two sends would upload the same files twice.
-  const sending = useRef(false);
+  // A second Enter can arrive before React has re-rendered with the composer cleared, and two
+  // sends would upload the same files twice. So the composer's contents are claimed through
+  // refs, synchronously, rather than by refusing the second send: refusing was how a message
+  // typed in the second or two the first POST takes was silently dropped. The counter is what
+  // keeps the queue's own delivery from overlapping another send.
+  const sending = useRef(0);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
   const imageInput = useRef<HTMLInputElement | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
   // Off by default, per spec §5. A ref as well as state because the SSE frame handler is
@@ -216,6 +303,26 @@ export function AgentPage({
   const [showProcess, setShowProcess] = useState(readShowProcess);
   const showProcessRef = useRef(showProcess);
   showProcessRef.current = showProcess;
+
+  // What the tab's dot means: a reply arrived that the user has not looked at yet. Not "a run
+  // is in flight" — a dot for that could not tell you whether there is anything to read, and
+  // it was on for the whole run, which made it permanent background decoration (design.md §33).
+  const [unread, setUnread] = useState(false);
+  // Read inside the stream handler, which is created once and must not go stale when the page
+  // is hidden or shown.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+
+  // Messages typed while the agent works, delivered when the turn settles. Paired with the
+  // conversation so switching agents shows that agent's queue rather than a stranger's.
+  const [queue, setQueue] = useState<{ thread: string | null; items: QueuedMessage[] }>(() => {
+    const id = readStoredThread();
+    return { thread: id, items: readQueue(id) };
+  });
+  // Whether the conversation's state is known yet. A reload with a queued message must not
+  // release it before `streaming` has been read from the server: the agent may be mid-run, and
+  // sending then would be exactly the "talk over it" behaviour the queue exists to avoid.
+  const [ready, setReady] = useState(false);
 
   // Message ids already rendered. The stream and a REST re-fetch overlap by design — the
   // client opens the stream first and then fetches — so the same message legitimately arrives
@@ -258,6 +365,7 @@ export function AgentPage({
       setLiveText("");
     }
     setLiveTool(null);
+    setReady(true);
   }, []);
 
   const refreshStatus = useCallback(async () => {
@@ -307,6 +415,10 @@ export function AgentPage({
             if (frame.message.role === "assistant") {
               setLiveText("");
               setLiveThink("");
+              // A checkpoint counts, and a tool row does not: the first is the agent talking to
+              // the reader, the second is machinery. Marked only when the page is not the one on
+              // screen — a message you watched arrive is not unread.
+              if (!visibleRef.current) setUnread(true);
             }
             if (frame.message.role === "tool") setLiveTool(null);
             break;
@@ -372,9 +484,28 @@ export function AgentPage({
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages, liveText, liveTool]);
 
+  // Looking at the conversation is what marks it read. There is no per-message receipt to
+  // track, and the dot only exists while the user is on the other page anyway.
   useEffect(() => {
-    onBusyChange?.(streaming || (showProcess && liveTool !== null));
-  }, [streaming, liveTool, showProcess, onBusyChange]);
+    if (visible) setUnread(false);
+  }, [visible]);
+
+  useEffect(() => {
+    onUnreadChange?.(unread);
+  }, [unread, onUnreadChange]);
+
+  // The queue follows the conversation. Loading and writing are separate effects, and the load
+  // is keyed on the id the items are *stored under* rather than on `threadId` alone — writing
+  // the old agent's items under the new id would hand this agent words meant for another.
+  useEffect(() => {
+    setQueue((current) =>
+      current.thread === threadId ? current : { thread: threadId, items: readQueue(threadId) },
+    );
+  }, [threadId]);
+
+  useEffect(() => {
+    if (queue.thread) writeQueue(queue.thread, queue.items);
+  }, [queue]);
 
   // --- theme --------------------------------------------------------------
   // Applied by App, not here: the theme is written to <html> and governs both pages, so it
@@ -429,15 +560,30 @@ export function AgentPage({
     };
   }, [menuOpen]);
 
+  // --- derived ------------------------------------------------------------
+  // `liveTool` only counts as busy when it is being shown. With the process toggle off, a
+  // running tool is invisible, and the header saying "bash…" would be reporting something the
+  // user cannot see and did not ask for. Declared here rather than below the actions because
+  // both the send path and the queue's release depend on it.
+  const busy = streaming || (showProcess && liveTool !== null);
+
   const send = useCallback(async () => {
-    const content = draft.trim();
-    const files = pending;
-    if ((!content && files.length === 0) || sending.current) return;
-    sending.current = true;
+    const content = draftRef.current.trim();
+    const files = pendingRef.current;
+    if (!content && files.length === 0) return;
+    // Claimed before the first `await`, so a second Enter in the same tick sees nothing to
+    // send rather than uploading the same files again.
+    draftRef.current = "";
+    pendingRef.current = [];
+    sending.current += 1;
     setDraft("");
     setPending([]);
     setError(null);
 
+    // Whether *this* call set `streaming`. A failure on the queue path (an upload that did not
+    // land) must not clear it: the turn that was already running is still running, and
+    // clearing it would both hide the stop button and release the queue into a live turn.
+    let started = false;
     // Uploaded but not yet named by a message. If the send then fails, these are the ids whose
     // bytes nobody will ever point at, so they are cleaned up rather than left on disk.
     const uploaded: string[] = [];
@@ -464,6 +610,29 @@ export function AgentPage({
       }
       setUploading(false);
 
+      if (busy) {
+        // The agent is mid-run, so this waits its turn instead of replacing the send button
+        // with a stop button and leaving the user no way to say the next thing (design.md
+        // §33). Nothing is posted yet: the message is ours until the turn settles, which is
+        // why it can still be removed, and why `setStreaming` is deliberately not called — the
+        // stop button belongs to the turn that is actually running.
+        const queued: QueuedMessage = {
+          key: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+          content,
+          attachmentIds: uploaded,
+          names: files.map((entry) => entry.file.name),
+        };
+        setQueue((current) => {
+          // The conversation may have just been resolved above, in which case `current` is
+          // still keyed on the old one (or none) and appending blindly would either attach
+          // this to the wrong agent or be replaced by the load effect.
+          const base = current.thread === id ? current.items : readQueue(id);
+          return { thread: id, items: [...base, queued] };
+        });
+        return;
+      }
+
+      started = true;
       setStreaming(true);
       // The server stores and publishes the user's message, but waiting for the round trip
       // through the stream would make the composer feel broken on a slow link, so the
@@ -471,7 +640,7 @@ export function AgentPage({
       upsert(await sendAgentMessage(id, content, uploaded));
     } catch (err) {
       setUploading(false);
-      setStreaming(false);
+      if (started) setStreaming(false);
       // The selection is not lost: a failed send puts the files back *in front of* anything
       // chosen while it was in flight. Uploads are removed only when the server answered with
       // an error — that request never reached the agent. A **transport** failure (`TypeError`)
@@ -488,9 +657,48 @@ export function AgentPage({
       else if (err instanceof Error && err.message === UNAUTHORIZED) setNeedsToken(true);
       else setError(agentErrorMessage(err));
     } finally {
-      sending.current = false;
+      sending.current -= 1;
     }
-  }, [draft, pending, threadId, upsert]);
+  }, [busy, threadId, upsert]);
+
+  /**
+   * Deliver the head of the queue once the agent is no longer working.
+   *
+   * One message per turn, not the whole queue at once: the next one is a *follow-up*, and
+   * sending it while the previous answer is still being written would make two replies
+   * interleave. `busy` turning false is the only trigger, so pressing Stop releases the queue
+   * — which is the interruption behaviour, and the reason Stop does not clear it.
+   */
+  useEffect(() => {
+    if (!ready || busy || sending.current > 0) return;
+    if (queue.thread === null || queue.thread !== threadId) return;
+    const item = queue.items[0];
+    if (!item) return;
+
+    const thread = queue.thread;
+    sending.current += 1;
+    setError(null);
+    void (async () => {
+      try {
+        setStreaming(true);
+        const message = await sendAgentMessage(thread, item.content, item.attachmentIds);
+        upsert(message);
+        setQueue((current) => ({
+          ...current,
+          items: current.items.filter((entry) => entry.key !== item.key),
+        }));
+      } catch (err) {
+        // Kept at the head of the queue: a message the user wrote is not discarded because
+        // the agent was unreachable. Removing it stays the user's decision.
+        setStreaming(false);
+        if (isAgentDisabled(err)) setDisabled(true);
+        else if (err instanceof Error && err.message === UNAUTHORIZED) setNeedsToken(true);
+        else setError(agentErrorMessage(err));
+      } finally {
+        sending.current -= 1;
+      }
+    })();
+  }, [busy, queue, ready, threadId, upsert]);
 
   const stop = useCallback(async () => {
     if (!threadId) return;
@@ -526,6 +734,10 @@ export function AgentPage({
         setLiveTool(null);
         setThreadId(answer.thread.id);
         storeThread(answer.thread.id);
+        // A different agent has said nothing to this one's reader yet, and the queue for it is
+        // loaded by the thread-id effect above.
+        setUnread(false);
+        setReady(true);
       } catch (err) {
         setError(agentErrorMessage(err));
       } finally {
@@ -537,10 +749,6 @@ export function AgentPage({
 
   // --- derived ------------------------------------------------------------
   const agentName = backendLabel(status?.backend ?? "agenest");
-  // `liveTool` only counts as busy when it is being shown. With the process toggle off, a
-  // running tool is invisible, and the header saying "bash…" would be reporting something the
-  // user cannot see and did not ask for.
-  const busy = streaming || (showProcess && liveTool !== null);
 
   /**
    * The transcript: messages with their separators and grouping folded in.
@@ -792,6 +1000,41 @@ export function AgentPage({
           void send();
         }}
       >
+        {/* Typed while the agent was working. Above the pill, like the pending files, because
+            removing one must be its own tap — and because a queued message is not part of the
+            transcript until it has been sent. */}
+        {queue.items.length > 0 && (
+          <div className="tgcompose__queue" role="status" aria-label="Queued messages">
+            {queue.items.map((item) => (
+              <span className="queued" key={item.key}>
+                <span className="queued__tag">Queued</span>
+                <span className="queued__text">
+                  {item.content || item.names.join(", ") || "Attachment"}
+                </span>
+                <button
+                  type="button"
+                  className="queued__x"
+                  onClick={() => {
+                    // The upload happened when this was queued, and removing the message is
+                    // the one case where nobody will ever name those bytes — unlike a
+                    // transport failure, which may have landed.
+                    for (const attachmentId of item.attachmentIds) {
+                      void deleteAgentAttachment(attachmentId).catch(() => undefined);
+                    }
+                    setQueue((current) => ({
+                      ...current,
+                      items: current.items.filter((entry) => entry.key !== item.key),
+                    }));
+                  }}
+                  aria-label="Remove queued message"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         {(pending.length > 0 || uploading) && (
           <div className="tgcompose__pending">
             {pending.map((entry) => (
@@ -871,7 +1114,10 @@ export function AgentPage({
             rows={1}
             aria-label={`Message ${agentName}`}
           />
-          {busy ? (
+          {/* Two buttons while a turn is running, not one that changes meaning: send stays
+              send (it queues), and stop is beside it. Swapping them was what made "say one
+              more thing" impossible without cancelling the answer being written. */}
+          {busy && (
             <button
               type="button"
               className="tgcompose__btn tgcompose__btn--stop"
@@ -881,17 +1127,16 @@ export function AgentPage({
             >
               <IconStop size={18} />
             </button>
-          ) : (
-            <button
-              type="submit"
-              className="tgcompose__btn"
-              disabled={uploading || (!draft.trim() && pending.length === 0)}
-              aria-label="Send"
-              title="Send"
-            >
-              <IconSend size={18} />
-            </button>
           )}
+          <button
+            type="submit"
+            className="tgcompose__btn"
+            disabled={uploading || (!draft.trim() && pending.length === 0)}
+            aria-label={busy ? "Queue message" : "Send"}
+            title={busy ? "Queue — sent when the agent finishes" : "Send"}
+          >
+            <IconSend size={18} />
+          </button>
         </div>
 
         {/* Two pickers rather than one: `accept` is what makes a phone offer the camera roll
