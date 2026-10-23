@@ -509,6 +509,21 @@ Distilled from Telegram iOS, and the interaction rules are load-bearing rather t
   the memory feature and the row was the only way to forget a token — with one credential and no
   second secret, both went (§22, §23). The backend memory is untouched: Dream still runs on its
   clock and the agent still re-reads it every prompt; it just has no settings entry.
+- **A sent message is drawn before anything answers, and a switch draws a spinner.** The POST is
+  one round trip and each file another, so waiting for it looked like a button that did nothing;
+  the bubble appears with the press, is drawn quieter until acknowledged, and is replaced by the
+  agent's own row from *either* the POST response or the stream echo, whichever wins. It is a
+  separate list from `messages` — that one is the agent's record, deduped on its id, and a
+  placeholder there could never match its own echo. A failed send stays where it was typed and
+  says "Not sent"; a **queued** message is still not a bubble (§33). Switching clears the
+  transcript at once and shows a spinner, never the empty state — "this agent has never said
+  anything" is a claim, and the second after the user asked to see it is the one moment it is
+  certainly wrong. `threadId` still names the old agent mid-switch, so the composer refuses to
+  send then (§34).
+- **The typing dots step aside only for a tool row that is being shown.** Suppressing them on the
+  strength of a hidden one left the transcript with no sign of life for the length of every
+  command. The header follows the same rule: with the process view off it says "typing…", not the
+  name of a command the reader chose not to see.
 - **Only agent prose is Markdown.** A user's message is rendered as typed; reinterpreting their
   own words back at them is presumptuous and wrong if they pasted markup.
 - **Attachments are cards, and the `+` is outside the pill.** The attach menu offers Photo

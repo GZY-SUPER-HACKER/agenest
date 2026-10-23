@@ -740,6 +740,55 @@
   overflow-wrap: anywhere;
 }
 
+/* Sent, not yet acknowledged (AgentPage's `Outgoing`). Quieter rather than differently coloured:
+   it is the user's own message either way, and the only thing that has changed is that the page
+   has not heard back. */
+.bubble[data-pending="true"] {
+  opacity: 0.68;
+  transition: opacity 0.2s var(--ease);
+}
+
+/* It did not go. Never by fill alone — the bubble carries the words "Not sent" — so the edge is
+   only a second signal, in the one colour reserved for something that went wrong. */
+.bubble[data-failed="true"] {
+  border-color: color-mix(in srgb, var(--dead) 45%, transparent);
+}
+
+.bubble__failed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--dead);
+  font-size: var(--t-caption);
+}
+
+.bubble__failed-x {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.bubble__failed-x:hover {
+  background: var(--raise);
+  opacity: 1;
+}
+
+/* A file whose upload has not landed yet: a name, because there is no id to fetch bytes with.
+   The dashed edge is the same "not there yet" the queued strip uses, and colour is inherited
+   from the bubble like every other part of a card (§29). */
+.attach--pending {
+  padding: 6px 8px;
+  border: 1px dashed color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 10px;
+}
+
 /* --------------------------------------------------------------------------
  * empty state
  * ----------------------------------------------------------------------- */
@@ -763,6 +812,42 @@
   color: var(--ink-3);
   font-size: var(--t-preview);
   line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+ * loading
+ * ----------------------------------------------------------------------- */
+/* The transcript has not arrived yet: boot, or a switch that cleared the agent being left.
+   A spinner rather than the empty state, because "this agent has never said anything" is a
+   claim and a conversation that is still downloading is not that (docs/design.md §34). */
+.tgload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38vh;
+}
+
+.tgload__ring {
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink-3);
+  border-radius: 50%;
+  animation: tg-spin 0.9s linear infinite;
+}
+
+@keyframes tg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Slower, not stopped. A motionless ring is indistinguishable from a decoration, and "is this
+   doing anything?" is the only question it exists to answer. */
+@media (prefers-reduced-motion: reduce) {
+  .tgload__ring {
+    animation-duration: 2.4s;
+  }
 }
 
 /* --------------------------------------------------------------------------
