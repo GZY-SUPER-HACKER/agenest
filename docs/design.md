@@ -1943,3 +1943,49 @@ them.
 Rejected: **disabling the composer while busy.** It is the simplest implementation and the one
 that reads as a broken app — the user's next sentence is exactly what they are composing while
 watching the answer arrive.
+
+## 34. A message appears when Send is pressed, and a switch says it is loading
+
+Three things on the agent page were technically correct and felt broken, because each one left
+the screen asserting something that was not true yet.
+
+**A sent message existed only after the round trip.** The POST is one request and every file is
+another, so pressing Send cleared the composer and changed nothing else — the exact feedback
+shape of a button that did not work, and the most likely answer to it is pressing Send again.
+`AgentPage` now draws the message in the transcript immediately (`Outgoing`), removes it when
+the agent's own row arrives, and does not care which response got there first: the stream echo
+of a message routinely beats the POST that sent it, so both paths settle the same placeholder.
+
+- It is a **separate list, not a fake id in `messages`**. That list is the agent's record and is
+  deduped on the agent's id; a placeholder in it could never match its own echo and would
+  survive the re-fetch that replaces everything else.
+- The bubble is the user's, drawn quieter until acknowledged, because the request is genuinely
+  on the wire. This is not §2's inference rule being bent: *the page* knows it sent something,
+  which is a fact about the page rather than a claim about the agent.
+- A send that fails **stays where it was typed** and says "Not sent", with the reason in the
+  notice. Removing it would read as delivered-then-vanished, and re-adding the text to the
+  composer silently is the same loss with less visible machinery. The files fall back to their
+  names, because the uploads behind them are deleted on a server-side error.
+- A **queued** message is still not a bubble (§33). Nothing has been posted, so drawing it would
+  put words in the agent's mouth; the queue strip is where it belongs.
+
+Rejected: **a server-side "pending" flag and a real id before the POST.** It needs a second
+message identity, a reconciliation rule for when the agent names it, and a wire field that says
+"not sent yet" — for a state the page already knows and nobody else ever needs.
+
+**The three dots were suppressed by a row nobody could see.** The typing bubble already existed,
+but it stood aside whenever a tool was running — including with the process view off, where the
+tool row is not drawn at all. For the length of every command the transcript showed nothing at
+all. The rule is now the one the header always claimed: the dots step aside for a tool **only
+when that tool is being shown**. The header follows the same line: with the process view off it
+says "typing…" rather than naming a command the reader chose not to see.
+
+**A switch drew the empty state for a conversation that was still arriving.** Switching agents
+now clears the transcript at once — leaving the old agent's messages under the new agent's name
+for a round trip is how "my history did not sync" starts — and draws a **spinner** in its place
+(`loadingThread`), not the empty state. "This agent has never said anything" is a claim, and the
+one moment it is certain to be wrong is the second after the user asked to see that agent. Boot
+uses the same flag, so a reload no longer flashes "agenest has never said anything" before the
+first fetch answers. A switch whose answer is lost puts the previous conversation back rather
+than leaving a pane that reads as an empty agent, and the composer refuses to send while a
+switch is in flight: `threadId` still names the agent being left.

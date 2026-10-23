@@ -184,6 +184,38 @@ function writeQueue(threadId: string, items: QueuedMessage[]): void {
   }
 }
 
+/**
+ * A sent message the agent has not acknowledged yet, drawn the moment Send is pressed.
+ *
+ * The POST is one round trip and an upload is one per file, so waiting for the response left the
+ * composer cleared and the transcript unchanged — the exact shape of a button that did not work,
+ * and the most likely response to it is pressing Send again. What makes this honest rather than
+ * a guess is that it is *ours*: the request is already on the wire, so "you have sent this" is a
+ * fact about the page, not an inference about the agent (§2's rule is about reported state).
+ *
+ * It is kept out of `messages` on purpose. That list is what the *agent* said, deduped on the
+ * agent's own id; a placeholder in it would be a row that can never match its own echo, and
+ * would survive the re-fetch that replaces everything else. Here it is removed by its local key
+ * the moment the real row arrives — from the POST response or from the stream, whichever wins.
+ */
+interface Outgoing {
+  /** Local, stable only within this list. Never sent anywhere. */
+  key: string;
+  /** The conversation it was posted to, so a switch cannot draw it under the new agent. */
+  thread: string;
+  content: string;
+  /**
+   * One entry per file chosen. `attachment` fills in as each upload lands, so the same row goes
+   * from "a name" to a real card without changing shape.
+   */
+  files: Array<{ key: string; name: string; mime: string; attachment: AgentAttachment | null }>;
+  /**
+   * Why it never reached the agent, or null while it is in flight. A failed send stays where it
+   * was typed and says so — deleting it would read as "delivered, then quietly vanished".
+   */
+  failed: string | null;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -268,11 +300,19 @@ export function AgentPage({
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [threadId, setThreadId] = useState<string | null>(readStoredThread);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  // Pressed Send, not yet acknowledged. Drawn with the transcript so the words appear before
+  // any network call answers — see `Outgoing`.
+  const [outgoing, setOutgoing] = useState<Outgoing[]>([]);
   const [streaming, setStreaming] = useState(false);
   //: The backend a switch is currently in flight for. The transcript is cleared the moment a
   //: switch starts, so without this the pane is blank for the round trip and reads as "my
   //: messages are not syncing" rather than "this is loading".
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
+  // Whether the conversation on screen has not arrived yet. Boot and a switch both clear the
+  // transcript before the fetch answers, and an empty list is otherwise indistinguishable from
+  // "this agent has never said anything" — which is a claim, and the wrong one. A spinner says
+  // "not yet" instead (design.md §34).
+  const [loadingThread, setLoadingThread] = useState(true);
   const [liveText, setLiveText] = useState("");
   const [liveThink, setLiveThink] = useState("");
   const [liveTool, setLiveTool] = useState<string | null>(null);
@@ -345,6 +385,33 @@ export function AgentPage({
     setMessages((current) => [...current, message]);
   }, []);
 
+  /**
+   * Drop the placeholder for a message the agent has now acknowledged.
+   *
+   * Both paths call it: the POST response and the stream's echo of the same message, which
+   * routinely wins — the server publishes the row as it stores it, so the frame can arrive
+   * before the HTTP answer does. Without this the page showed the message twice for a moment,
+   * and once for the rest of the session whenever the POST was slower than the stream.
+   *
+   * Matched on `(thread, text)` and oldest-first, because the placeholder has no id to match on
+   * and identical text twice is the only ambiguity — which resolves to removing the earlier
+   * copy, the same order the two were sent in.
+   */
+  const settleOutgoing = useCallback((message: AgentMessage) => {
+    if (message.role !== "user") return;
+    setOutgoing((current) => {
+      if (current.length === 0) return current;
+      const index = current.findIndex(
+        (item) =>
+          item.thread === message.thread_id &&
+          item.failed === null &&
+          item.content === message.content,
+      );
+      if (index === -1) return current;
+      return current.filter((_, i) => i !== index);
+    });
+  }, []);
+
   const loadThread = useCallback(async (id: string) => {
     // Only ask for what the page will draw: tool rows are most of a long transcript's bytes,
     // and the process view is off by default. Turning it on refetches with them.
@@ -411,6 +478,9 @@ export function AgentPage({
             }
             break;
           case "agent.message":
+            // The echo of what this page just sent replaces its placeholder, whichever of the
+            // two responses arrives first.
+            settleOutgoing(frame.message);
             upsert(frame.message);
             if (frame.message.role === "assistant") {
               setLiveText("");
@@ -440,7 +510,7 @@ export function AgentPage({
       },
     });
     return () => handle.close();
-  }, [loadThread, upsert]);
+  }, [loadThread, settleOutgoing, upsert]);
 
   // --- initial load -------------------------------------------------------
   /**
@@ -456,14 +526,19 @@ export function AgentPage({
    * that is actually active.
    */
   const boot = useCallback(async () => {
-    if (!(await refreshStatus())) return;
+    setLoadingThread(true);
     try {
+      if (!(await refreshStatus())) return;
       const session = await openAgentSession();
       storeThread(session.id);
       setThreadId(session.id);
       await loadThread(session.id);
     } catch (err) {
       setError(agentErrorMessage(err));
+    } finally {
+      // Cleared even on failure: a spinner that never stops is a worse answer than the empty
+      // state plus the error above it.
+      setLoadingThread(false);
     }
   }, [loadThread, refreshStatus]);
 
@@ -478,11 +553,12 @@ export function AgentPage({
     return () => window.clearInterval(timer);
   }, [refreshStatus]);
 
-  // Keep the newest line in view, including while text is still arriving.
+  // Keep the newest line in view, including while text is still arriving — and including the
+  // bubble drawn the moment Send is pressed, which is the one the user is looking at.
   useEffect(() => {
     const node = scroller.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [messages, liveText, liveTool]);
+  }, [messages, outgoing, liveText, liveTool]);
 
   // Looking at the conversation is what marks it read. There is no per-message receipt to
   // track, and the dot only exists while the user is on the other page anyway.
@@ -571,6 +647,10 @@ export function AgentPage({
     const content = draftRef.current.trim();
     const files = pendingRef.current;
     if (!content && files.length === 0) return;
+    // Mid-switch, `threadId` still names the agent being left; posting now would address the
+    // one the user is walking away from. Checked before the composer is claimed, so nothing
+    // typed is lost.
+    if (switchingTo !== null) return;
     // Claimed before the first `await`, so a second Enter in the same tick sees nothing to
     // send rather than uploading the same files again.
     draftRef.current = "";
@@ -584,6 +664,12 @@ export function AgentPage({
     // land) must not clear it: the turn that was already running is still running, and
     // clearing it would both hide the stop button and release the queue into a live turn.
     let started = false;
+    // Read here rather than after the uploads: whether this is a follow-up is decided by the
+    // turn that was running when the user pressed Send, not by whether it survived the upload.
+    const queueIt = busy;
+    // The placeholder this send draws, or null when it is queued — a queued message is not in
+    // the conversation yet and must not be drawn as if it were (§33).
+    let placeholder: string | null = null;
     // Uploaded but not yet named by a message. If the send then fails, these are the ids whose
     // bytes nobody will ever point at, so they are cleaned up rather than left on disk.
     const uploaded: string[] = [];
@@ -601,16 +687,56 @@ export function AgentPage({
         setMessages([]);
       }
 
+      // Drawn before the first request, which is the whole point: the composer has just been
+      // cleared, and a button whose only visible effect is losing your text reads as broken.
+      if (!queueIt) {
+        const key = `out:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        placeholder = key;
+        setOutgoing((current) => [
+          ...current,
+          {
+            key,
+            thread: id as string,
+            content,
+            files: files.map((entry) => ({
+              key: entry.key,
+              name: entry.file.name,
+              mime: entry.file.type,
+              attachment: null,
+            })),
+            failed: null,
+          },
+        ]);
+      }
+
       // Upload first, then send one message naming the files. The agent receives a message, not
       // a stream of half-attached files, and a failure part-way leaves nothing to retract.
       if (files.length > 0) setUploading(true);
-      for (const entry of files) {
-        const attachment = await uploadAgentAttachment(id, entry.file);
+      for (let at = 0; at < files.length; at += 1) {
+        const attachment = await uploadAgentAttachment(id, files[at].file);
         uploaded.push(attachment.id);
+        // The card replaces the name the moment the bytes are on the server: an attachment id
+        // is all `AttachmentCard` needs, so an image is already visible while the message that
+        // names it is still being posted.
+        const key = placeholder;
+        if (key !== null) {
+          setOutgoing((current) =>
+            current.map((item) =>
+              item.key === key
+                ? {
+                    ...item,
+                    files: item.files.map((file, index) =>
+                      index === at ? { ...file, attachment } : file,
+                    ),
+                  }
+                : item,
+            ),
+          );
+        }
       }
       setUploading(false);
 
-      if (busy) {
+      if (queueIt) {
         // The agent is mid-run, so this waits its turn instead of replacing the send button
         // with a stop button and leaving the user no way to say the next thing (design.md
         // §33). Nothing is posted yet: the message is ours until the turn settles, which is
@@ -636,18 +762,42 @@ export function AgentPage({
       setStreaming(true);
       // The server stores and publishes the user's message, but waiting for the round trip
       // through the stream would make the composer feel broken on a slow link, so the
-      // returned row is rendered directly. `upsert` makes the later stream copy a no-op.
-      upsert(await sendAgentMessage(id, content, uploaded));
+      // returned row is rendered directly. `upsert` makes the later stream copy a no-op, and
+      // this removes the placeholder the page has been showing with the same text.
+      const message = await sendAgentMessage(id, content, uploaded);
+      const key = placeholder;
+      if (key !== null) setOutgoing((current) => current.filter((item) => item.key !== key));
+      upsert(message);
     } catch (err) {
       setUploading(false);
       if (started) setStreaming(false);
-      // The selection is not lost: a failed send puts the files back *in front of* anything
-      // chosen while it was in flight. Uploads are removed only when the server answered with
-      // an error — that request never reached the agent. A **transport** failure (`TypeError`)
-      // may have been accepted before the connection dropped, and deleting then would break a
-      // message that landed; those files stay on disk, orphaned, which costs bytes and nothing
-      // else.
-      if (files.length > 0) setPending((current) => [...files, ...current]);
+      const reason = agentErrorMessage(err);
+      const key = placeholder;
+      if (key !== null) {
+        // The message stays where it was typed and says it did not go. Removing it would look
+        // like it had been delivered and then quietly vanished, which is the one reading the
+        // user cannot recover from. The files fall back to their names: the uploads are about
+        // to be deleted, and a card whose bytes are gone is a card that cannot open.
+        setOutgoing((current) =>
+          current.map((item) =>
+            item.key === key
+              ? {
+                  ...item,
+                  failed: reason,
+                  files: item.files.map((file) => ({ ...file, attachment: null })),
+                }
+              : item,
+          ),
+        );
+      } else if (files.length > 0) {
+        // Nothing was drawn, so the selection goes back *in front of* anything chosen while it
+        // was in flight.
+        setPending((current) => [...files, ...current]);
+      }
+      // Uploads are removed only when the server answered with an error — that request never
+      // reached the agent. A **transport** failure (`TypeError`) may have been accepted before
+      // the connection dropped, and deleting then would break a message that landed; those
+      // files stay on disk, orphaned, which costs bytes and nothing else.
       if (!(err instanceof TypeError)) {
         for (const attachmentId of uploaded) {
           void deleteAgentAttachment(attachmentId).catch(() => undefined);
@@ -655,11 +805,11 @@ export function AgentPage({
       }
       if (isAgentDisabled(err)) setDisabled(true);
       else if (err instanceof Error && err.message === UNAUTHORIZED) setNeedsToken(true);
-      else setError(agentErrorMessage(err));
+      else setError(reason);
     } finally {
       sending.current -= 1;
     }
-  }, [busy, threadId, upsert]);
+  }, [busy, switchingTo, threadId, upsert]);
 
   /**
    * Deliver the head of the queue once the agent is no longer working.
@@ -671,6 +821,9 @@ export function AgentPage({
    */
   useEffect(() => {
     if (!ready || busy || sending.current > 0) return;
+    // Not mid-switch either: `threadId` still names the agent being left until the answer
+    // arrives, and releasing a message into it would address the one the user is leaving.
+    if (loadingThread || switchingTo !== null) return;
     if (queue.thread === null || queue.thread !== threadId) return;
     const item = queue.items[0];
     if (!item) return;
@@ -698,7 +851,7 @@ export function AgentPage({
         sending.current -= 1;
       }
     })();
-  }, [busy, queue, ready, threadId, upsert]);
+  }, [busy, loadingThread, queue, ready, switchingTo, threadId, upsert]);
 
   const stop = useCallback(async () => {
     if (!threadId) return;
@@ -713,6 +866,17 @@ export function AgentPage({
     async (name: string) => {
       setError(null);
       setSwitchingTo(name);
+      setLoadingThread(true);
+      // The old agent's transcript goes now, not when the answer arrives: leaving it under the
+      // new agent's name for a round trip is how a switch reads as "these are my messages and
+      // they did not sync" — or worse, as the other agent's history. What replaces it is the
+      // spinner, not the empty state: this agent may have plenty to say, it just has not
+      // arrived yet.
+      setMessages([]);
+      setStreaming(false);
+      setLiveText("");
+      setLiveThink("");
+      setLiveTool(null);
       try {
         // One request: the switch, the conversation to show, and its messages. The three
         // primitives it composes are sequential — session needs the switch, messages need the
@@ -729,9 +893,6 @@ export function AgentPage({
         );
         setMessages(answer.thread.messages);
         setStreaming(answer.thread.streaming);
-        setLiveText("");
-        setLiveThink("");
-        setLiveTool(null);
         setThreadId(answer.thread.id);
         storeThread(answer.thread.id);
         // A different agent has said nothing to this one's reader yet, and the queue for it is
@@ -740,11 +901,23 @@ export function AgentPage({
         setReady(true);
       } catch (err) {
         setError(agentErrorMessage(err));
+        // The switch did not happen, or its answer was lost on the way back. Put the
+        // conversation this page was showing back rather than leaving a pane that reads as an
+        // agent with no history.
+        const current = readStoredThread();
+        if (current) {
+          try {
+            await loadThread(current);
+          } catch {
+            /* the switch's own error is the one worth showing */
+          }
+        }
       } finally {
         setSwitchingTo(null);
+        setLoadingThread(false);
       }
     },
-    [],
+    [loadThread],
   );
 
   // --- derived ------------------------------------------------------------
@@ -791,6 +964,10 @@ export function AgentPage({
     }
     return items;
   }, [messages, showProcess]);
+
+  // Only the conversation on screen. A placeholder left behind by a failed send is the old
+  // agent's, and drawing it under the new one would put words in the wrong mouth.
+  const outgoingHere = outgoing.filter((item) => item.thread === threadId);
 
   // --- render -------------------------------------------------------------
   /**
@@ -884,9 +1061,12 @@ export function AgentPage({
             ) : busy ? (
               <>
                 <span className="tghead__dot" data-state="working" />
-                {liveTool ? `${liveTool}…` : "typing…"}
+                {/* The tool's name only when the row drawing it is on: with the process view
+                    off, "bash…" reports machinery the reader chose not to see (§2's rule at
+                    its smallest scale). */}
+                {showProcess && liveTool ? `${liveTool}…` : "typing…"}
               </>
-            ) : !status?.connected ? (
+            ) : loadingThread ? null : !status?.connected ? (
               <>
                 <span className="tghead__dot" data-state="down" />
                 offline
@@ -925,17 +1105,26 @@ export function AgentPage({
 
       {/* --- transcript ------------------------------------------------ */}
       <div className="tgchat" ref={scroller}>
-        {messages.length === 0 && !busy ? (
+        {loadingThread ? (
+          /*
+           * A conversation still on its way is not an empty one. Boot and a switch both clear
+           * the transcript before the fetch answers, so without this the pane drew "this agent
+           * has never said anything" for the round trip — a claim, made about the one agent the
+           * reader has just asked to see, and the exact moment they are trying to tell whether
+           * their history survived the switch (design.md §34).
+           */
+          <div className="tgload" role="status" aria-label="Loading the conversation">
+            <span className="tgload__ring" />
+          </div>
+        ) : messages.length === 0 && outgoingHere.length === 0 && !busy ? (
           <div className="tgempty">
             <p className="tgempty__title">{agentName}</p>
             <p className="tgempty__body">
-              {switchingTo
-                ? "Switching agents — loading its conversation…"
-                : status?.backend === "native"
-                  ? `A local agent on this machine${
-                      status.workdir ? `, working in ${status.workdir}` : ""
-                    }. It can read and edit files and run commands.`
-                  : "Your own agent gateway, with its memory and tools."}
+              {status?.backend === "native"
+                ? `A local agent on this machine${
+                    status.workdir ? `, working in ${status.workdir}` : ""
+                  }. It can read and edit files and run commands.`
+                : "Your own agent gateway, with its memory and tools."}
             </p>
           </div>
         ) : (
@@ -949,6 +1138,18 @@ export function AgentPage({
                 <Bubble key={item.key} message={item.message} />
               ),
             )}
+
+            {/* Pressed Send, not yet acknowledged. Below the record because it is always the
+                newest thing said, and only for the conversation it was posted to. */}
+            {outgoingHere.map((item) => (
+              <OutgoingBubble
+                key={item.key}
+                item={item}
+                onDismiss={() =>
+                  setOutgoing((current) => current.filter((entry) => entry.key !== item.key))
+                }
+              />
+            ))}
 
             {/* Reasoning, live. Shown only when asked for; see the delta handler. */}
             {showProcess && liveThink && (
@@ -974,13 +1175,16 @@ export function AgentPage({
               </div>
             )}
 
-            {busy && !liveText && !liveTool && (
-              /*
-               * The gap between "accepted" and "first token". Without this the page looks
-               * frozen for the second or two the model spends thinking, and the most likely
-               * user response to a frozen page is to press send again.
-               */
-              <div className="bubble bubble--in bubble--typing" role="status">
+            {/* The gap between "accepted" and "first token". Without this the page looks
+                frozen for the second or two the model spends thinking, and the most likely
+                user response to a frozen page is to press send again.
+
+                A tool that is being *shown* is the same announcement in a more useful form, so
+                the dots step aside for it — but only then. With the process view off the row is
+                not drawn at all, and suppressing the dots on the strength of a hidden row left
+                the transcript with no sign of life whatsoever for the length of the command. */}
+            {busy && !liveText && !(showProcess && liveTool) && (
+              <div className="bubble bubble--in bubble--typing" role="status" aria-label="Typing">
                 <span className="typing">
                   <i />
                   <i />
@@ -1131,7 +1335,12 @@ export function AgentPage({
           <button
             type="submit"
             className="tgcompose__btn"
-            disabled={uploading || (!draft.trim() && pending.length === 0)}
+            disabled={
+              uploading ||
+              loadingThread ||
+              switchingTo !== null ||
+              (!draft.trim() && pending.length === 0)
+            }
             aria-label={busy ? "Queue message" : "Send"}
             title={busy ? "Queue — sent when the agent finishes" : "Send"}
           >
@@ -1293,6 +1502,65 @@ function Bubble({ message }: { message: AgentMessage }) {
           {message.attachments.map((attachment) => (
             <AttachmentCard key={attachment.id} attachment={attachment} />
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One message the user has pressed Send on that the agent has not acknowledged yet.
+ *
+ * Drawn as the outgoing bubble it is about to become, so settling it changes one attribute
+ * rather than making a row appear from nowhere — which is exactly what the old path did, and
+ * what made a working button read as an ignored one. Both states it can be in are facts the
+ * page knows rather than guesses about the agent: the request is on the wire, or it came back
+ * with an error. An *inferred* state would not be allowed to wear a bubble (§2); a local one
+ * can, and the word "Not sent" says which it is without relying on the fill alone.
+ */
+function OutgoingBubble({ item, onDismiss }: { item: Outgoing; onDismiss: () => void }) {
+  return (
+    <div
+      className="bubble bubble--out"
+      data-out="true"
+      data-pending={item.failed === null ? "true" : undefined}
+      data-failed={item.failed === null ? undefined : "true"}
+    >
+      {item.content && <span className="bubble__text">{item.content}</span>}
+      {item.files.length > 0 && (
+        <div className="attachments">
+          {item.files.map((file) =>
+            file.attachment ? (
+              <AttachmentCard key={file.key} attachment={file.attachment} />
+            ) : (
+              // Before its upload lands there is no id to fetch bytes with, so the file is its
+              // name and nothing more. The dashed edge is the same "not there yet" the queued
+              // strip uses — and it is the only state in which this row exists.
+              <span className="attach attach--pending" key={file.key}>
+                <span className="attach__icon" aria-hidden="true">
+                  {file.mime.startsWith("image/") ? (
+                    <IconImage size={16} />
+                  ) : (
+                    <IconFile size={16} />
+                  )}
+                </span>
+                <span className="attach__name">{file.name}</span>
+              </span>
+            ),
+          )}
+        </div>
+      )}
+      {item.failed !== null && (
+        <div className="bubble__failed" role="status" title={item.failed}>
+          <span>Not sent</span>
+          <button
+            type="button"
+            className="bubble__failed-x"
+            onClick={onDismiss}
+            aria-label="Dismiss the unsent message"
+          >
+            ×
+          </button>
         </div>
       )}
     </div>
