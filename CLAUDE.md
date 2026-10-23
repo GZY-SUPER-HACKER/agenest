@@ -168,6 +168,10 @@ of your problems.
   late event or `PATCH` moves a session. Without this the verdict depends on network arrival
   order — a retried `session_completed` racing a `session_failed` would flip the outcome.
   `unknown` is a *wall* for automatic transitions but an explicit `PATCH` may still change it.
+  That rule is only worth anything if it survives **concurrent** writers, which is why the
+  storage layer is part of it: one SQLite connection per thread, `write()` takes the write lock
+  with `BEGIN IMMEDIATE` before it reads, and an event never writes a status it did not change
+  (§35).
 - **Status is reported, never inferred.** No completion from event count, elapsed time, or
   output parsing. The one inference is `possibly_stale` — a display hint computed per
   response, rendered as "maybe offline" in the quietest style so it cannot read as a status.

@@ -391,7 +391,6 @@ def test_heartbeat_is_not_the_last_display_event(
 def test_stale_running_session_is_flagged(session_id: str, client: TestClient, db) -> None:
     """A quiet session is labelled, never silently marked failed."""
     db.execute("UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", (session_id,))
-    db._conn.commit()
     detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
     assert detail["possibly_stale"] is True
     assert detail["status"] == "running"
@@ -400,7 +399,6 @@ def test_stale_running_session_is_flagged(session_id: str, client: TestClient, d
 def test_finished_session_is_never_stale(session_id: str, client: TestClient, db) -> None:
     report(client, session_id, "session_completed", "done")
     db.execute("UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", (session_id,))
-    db._conn.commit()
     detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
     assert detail["possibly_stale"] is False
     assert detail["status"] == "completed"

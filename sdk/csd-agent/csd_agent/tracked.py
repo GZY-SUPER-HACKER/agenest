@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -88,9 +89,29 @@ def _save(entries: dict[str, Tracked]) -> None:
     path = config.tracked_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {key: entry.to_dict() for key, entry in entries.items()}
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # A **unique** temporary name, because hooks do run concurrently: closing one VS Code
+    # window fires a `SessionEnd` per open session in the same second, and a fixed
+    # `tracked.json.tmp` had one process rename the file the other was about to write —
+    # `FileNotFoundError` from `os.replace`, and that hook's update lost.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # Windows refuses to replace a file another process has open at that instant, and the
+        # other processes here are more hooks writing this same file. A unique name removed
+        # the "someone renamed my temp file" failure; the retry covers the remaining one.
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def put(entry: Tracked) -> None:

@@ -98,7 +98,6 @@ def test_connected_at_does_not_move_on_a_ping(client: TestClient, db) -> None:
     db.execute(
         "UPDATE agent_hosts SET connected_at = '2020-01-01T00:00:00.000Z'"
     )
-    db._conn.commit()
 
     report_host(client)  # an ordinary heartbeat from an already-connected host
 
@@ -111,7 +110,6 @@ def test_connected_at_moves_on_a_real_reconnect(client: TestClient, db) -> None:
     db.execute(
         "UPDATE agent_hosts SET connected_at = '2020-01-01T00:00:00.000Z'"
     )
-    db._conn.commit()
 
     report_host(client, connected=False)
     assert list_hosts(client)[0]["disconnected_at"] is not None
@@ -137,7 +135,6 @@ def test_a_disconnected_host_says_so(client: TestClient) -> None:
 def test_a_quiet_host_goes_possibly_stale(client: TestClient, db) -> None:
     report_host(client)
     db.execute("UPDATE agent_hosts SET last_seen_at = '2020-01-01T00:00:00.000Z'")
-    db._conn.commit()
     assert list_hosts(client)[0]["possibly_stale"] is True
 
 
@@ -154,7 +151,6 @@ def test_a_disconnected_host_is_never_stale(client: TestClient, db) -> None:
     """
     report_host(client, connected=False)
     db.execute("UPDATE agent_hosts SET last_seen_at = '2020-01-01T00:00:00.000Z'")
-    db._conn.commit()
     assert list_hosts(client)[0]["possibly_stale"] is False
 
 

@@ -447,60 +447,67 @@ def patch_session(db: Database, session_id: str, data: SessionPatch):
     Returns `(session, changed)`. `changed=False` means "nothing was applied", which the
     caller must not treat as a failure — a no-op patch is a legitimate de-duplicated retry.
     """
-    row = get_session_row(db, session_id)
-    if row is None:
+    if get_session_row(db, session_id) is None:
         return None, False
 
-    current = SessionStatus(row["status"])
     now = utcnow()
 
-    sets: list[str] = []
-    params: list[object] = []
-    transition: tuple[SessionStatus, SessionStatus] | None = None
-
-    if data.status is not None and data.status is not current:
-        if current in TERMINAL_STATUSES:
-            # Published verdicts are not re-opened by a late request.
-            return _row_to_session(row), False
-        if (
-            current is SessionStatus.unknown
-            and data.status not in TERMINAL_STATUSES
-            and data.status is not SessionStatus.running
-        ):
-            # `unknown` → anything other than a terminal state or a resume is not an
-            # automatic transition, so it is refused rather than guessed.
-            return _row_to_session(row), False
-        transition = (current, data.status)
-        sets.extend(["status = ?", "finished_at = ?"])
-        params.extend(
-            [data.status.value, now if data.status in TERMINAL_STATUSES else row["finished_at"]]
-        )
-
-    if data.title is not None:
-        sets.append("title = ?")
-        params.append(data.title)
-    if data.project_name is not None:
-        sets.append("project_name = ?")
-        params.append(data.project_name)
-    if data.summary is not None:
-        sets.append("summary = ?")
-        params.append(data.summary)
-    if data.exit_code is not None:
-        sets.append("exit_code = ?")
-        params.append(data.exit_code)
-
-    if not sets:
-        return _row_to_session(row), False
-
-    # Activity time only ever advances; monotonic updates keep a session from looking
-    # abandoned because a different machine's clock ran behind (CPB §8 / spec 8).
-    last_activity = max(row["last_activity_at"], now)
-    sets.append("updated_at = ?")
-    params.append(now)
-    sets.append("last_activity_at = ?")
-    params.append(last_activity)
-
     with db.write():
+        # Re-read under the write lock. The status this decision depends on is exactly the
+        # thing a concurrent request may be changing, and deciding "it is still running" from
+        # a snapshot taken before `BEGIN IMMEDIATE` is how two terminal verdicts both got
+        # applied — the later one silently replacing the earlier (docs/design.md §35).
+        row = get_session_row(db, session_id)
+        if row is None:
+            return None, False
+        current = SessionStatus(row["status"])
+
+        sets: list[str] = []
+        params: list[object] = []
+        transition: tuple[SessionStatus, SessionStatus] | None = None
+
+        if data.status is not None and data.status is not current:
+            if current in TERMINAL_STATUSES:
+                # Published verdicts are not re-opened by a late request.
+                return _row_to_session(row), False
+            if (
+                current is SessionStatus.unknown
+                and data.status not in TERMINAL_STATUSES
+                and data.status is not SessionStatus.running
+            ):
+                # `unknown` → anything other than a terminal state or a resume is not an
+                # automatic transition, so it is refused rather than guessed.
+                return _row_to_session(row), False
+            transition = (current, data.status)
+            sets.extend(["status = ?", "finished_at = ?"])
+            params.extend(
+                [data.status.value, now if data.status in TERMINAL_STATUSES else row["finished_at"]]
+            )
+
+        if data.title is not None:
+            sets.append("title = ?")
+            params.append(data.title)
+        if data.project_name is not None:
+            sets.append("project_name = ?")
+            params.append(data.project_name)
+        if data.summary is not None:
+            sets.append("summary = ?")
+            params.append(data.summary)
+        if data.exit_code is not None:
+            sets.append("exit_code = ?")
+            params.append(data.exit_code)
+
+        if not sets:
+            return _row_to_session(row), False
+
+        # Activity time only ever advances; monotonic updates keep a session from looking
+        # abandoned because a different machine's clock ran behind (CPB §8 / spec 8).
+        last_activity = max(row["last_activity_at"], now)
+        sets.append("updated_at = ?")
+        params.append(now)
+        sets.append("last_activity_at = ?")
+        params.append(last_activity)
+
         db.execute(
             f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", (*params, session_id)
         )

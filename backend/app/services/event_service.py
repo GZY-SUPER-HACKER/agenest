@@ -64,20 +64,23 @@ class IngestResult:
 def ingest_event(
     db, session_id: str, data: EventCreate, *, now: str | None = None
 ) -> IngestResult:
-    row = ss.get_session_row(db, session_id)
-    if row is None:
-        raise UnknownSessionError(session_id)
-
     received_at = now or utcnow()
     occurred_at = normalise_occurred(data.occurred_at, fallback=received_at)
 
-    existing = (
-        db.query_one("SELECT * FROM session_events WHERE event_key = ?", (data.event_key,))
-        if data.event_key
-        else None
-    )
-
     with db.write():
+        # Read inside the transaction, after `BEGIN IMMEDIATE` has the write lock. Reading
+        # before it is how a session completed by a concurrent request was written back as
+        # `running`: the row this code held was the pre-completion snapshot (design.md §35).
+        row = ss.get_session_row(db, session_id)
+        if row is None:
+            raise UnknownSessionError(session_id)
+
+        existing = (
+            db.query_one("SELECT * FROM session_events WHERE event_key = ?", (data.event_key,))
+            if data.event_key
+            else None
+        )
+
         event = ss.insert_event(
             db,
             session_id=session_id,
@@ -137,11 +140,10 @@ def _apply_session_effects(
         changed_status = True
         sets.extend(["status = ?", "finished_at = ?"])
         params.extend([status.value, received_at])
-    else:
-        # Guard, not a no-op: an event that implies completion must never open a closed
-        # session, and must not resurrect one that is `unknown`.
-        sets.append("status = ?")
-        params.append(current.value)
+    # Otherwise `status` is absent from the UPDATE on purpose. Writing `current` back looks
+    # like a no-op, but it restates a value read before this transaction — and when that value
+    # was already stale it reopened a completed session (docs/design.md §35). An event either
+    # moves the session to a terminal state or does not write the status at all.
 
     if event_type is EventType.heartbeat:
         # Renews the *quiet* clock only. `updated_at` stays put, so a session that is

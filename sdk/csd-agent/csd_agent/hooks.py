@@ -124,9 +124,17 @@ def on_session_start(payload: dict) -> None:
     # another directory's dead session is the heartbeat's business, not this hook's.
     for stale in tracked.for_cwd(cwd):
         if not tracked.process_alive(stale):
-            runtime.cpctl("session", "finish", "--session", stale.csd_session_id,
-                          "--status", "interrupted",
-                          "--summary", "Claude Code exited without reporting; closed on restart")
+            result = runtime.cpctl("session", "finish", "--session", stale.csd_session_id,
+                                   "--status", "interrupted",
+                                   "--summary", "Claude Code exited without reporting; "
+                                                "closed on restart")
+            if not result.ok:
+                # Same rule as `SessionEnd` below: a failed report keeps the entry tracked so
+                # the heartbeat can retry, rather than forgetting the only pointer to a row
+                # the server still believes is running.
+                _log(f"SessionStart: closing dead {stale.csd_session_id} failed: "
+                     f"{result.detail} (left tracked)")
+                continue
             tracked.drop(stale.cc_session_id)
             _log(f"SessionStart: closed dead {stale.csd_session_id} (pid {stale.pid} gone)")
 
@@ -202,9 +210,18 @@ def on_session_end(payload: dict) -> None:
         return
     reason = payload.get("reason") or "exit"
     cwd = payload.get("cwd") or entry.cwd
-    runtime.cpctl("session", "finish", "--session", entry.csd_session_id,
-                  "--status", "completed",
-                  "--summary", f"Claude Code session ended ({reason}) in {Path(cwd).name}")
+    result = runtime.cpctl("session", "finish", "--session", entry.csd_session_id,
+                           "--status", "completed",
+                           "--summary", f"Claude Code session ended ({reason}) in {Path(cwd).name}")
+    if not result.ok:
+        # **Do not drop the entry.** Dropping it is how a failed report becomes permanent:
+        # the dashboard keeps the session at `running` and the heartbeat, which is the only
+        # thing left that could close it, no longer knows it exists. Leaving it tracked lets
+        # the next probe see the process gone and report `interrupted` — the honest ending
+        # for a session whose own report never landed (design.md §35).
+        _log(f"SessionEnd: cpctl failed: {result.detail} "
+             f"({entry.csd_session_id} left tracked for the heartbeat)")
+        return
     tracked.drop(cc_id)
     _log(f"SessionEnd: closed {entry.csd_session_id} (reason={reason})")
 
