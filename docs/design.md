@@ -1989,3 +1989,63 @@ uses the same flag, so a reload no longer flashes "agenest has never said anythi
 first fetch answers. A switch whose answer is lost puts the previous conversation back rather
 than leaving a pane that reads as an empty agent, and the composer refuses to send while a
 switch is in flight: `threadId` still names the agent being left.
+
+## 35. One connection per thread, and a status is only written when it changes
+
+On 2026-10-21 a session on the school host was reported **completed** and the dashboard showed
+it `running` for the next 33 hours — with a `status_changed → completed` event on its own
+timeline. Closing it two days later wrote `interrupted`, because the row was still `running`
+and §3's guard had nothing to refuse.
+
+The evidence is two lines in the same second. Five `SessionEnd` hooks fire when one VS Code
+window closes, so the host sent five PATCHes at once. The service answered one of them `500`
+with `sqlite3.InterfaceError: bad parameter or other API misuse`, and answered the lost one
+`200` — while its `UPDATE` was rolled back underneath it and its event `INSERT` committed. The
+connector then dropped its tracked entry on the strength of that 200, so the five-minute
+heartbeat, the only thing left that could close the row, no longer knew it existed.
+
+**The cause is the connection, not the rule.** FastAPI runs sync endpoints in a threadpool, and
+`Database` held exactly one `sqlite3.connect(..., check_same_thread=False)` for the whole
+process. `write()` committed or rolled back whatever transaction was open on it — which, with
+two requests in flight, is the *other* request's. The module docstring had claimed "each
+request gets its own connection" for as long as the code had not done that; a claim in a
+comment is not isolation.
+
+What changed, and why each part is needed:
+
+- **A connection per thread** (`threading.local`, created on first use). Two threads then
+  cannot share a transaction at all.
+- **`write()` issues `BEGIN IMMEDIATE` before it yields.** Taking the write lock *before* the
+  first read is what makes a read-then-write decision atomic; a deferred transaction that
+  reads first and writes second can be beaten to the lock by the writer it was reasoning
+  about. `isolation_level=None` moves transaction control out of sqlite3's implicit handling
+  and into that one place.
+- **The session is re-read inside the transaction** (`patch_session`, `ingest_event`). The
+  status a decision depends on is the thing a concurrent request may be changing; deciding it
+  is "still running" from a snapshot taken before the lock is the lost update.
+- **An event writes `status` only when it moves the session to a terminal state.** Writing the
+  value back "unchanged" looks like a no-op and is exactly the line that reopened a completed
+  session. Nothing is lost by omitting it: an event that does not end a session has no opinion
+  about how it ended.
+- **The connector keeps its tracked entry when `cpctl` fails** (`SessionEnd`, and the
+  stale-session close on `SessionStart`). The heartbeat already reports "process gone"; the
+  entry is what lets it. Dropping it on the failure path leaves a row nobody on the host can
+  close.
+
+**The 200 is what made this expensive.** `cpctl` retries a failed report, so the `500` cost
+nothing. A success is not retried — and a success that committed half a change is worse than a
+failure, because it tells the reporter to forget the session. That is the invariant the tests
+in `test_concurrency.py` pin: writers are serialised, and a completion racing an event stream
+stays completed.
+
+Rejected: **one global lock around every query.** It also serialises reads, so an SSE client
+mid-replay would block ingest, and on this workload ingest is the thing that must never wait.
+Rejected: **`check_same_thread=True`.** It would only turn the bug into an exception, and the
+threadpool is many threads by design. Rejected: **retrying on the client.** The poisoned answer
+was `200`.
+
+The same audit found the connector side of the same shape: `on_session_end` dropped
+`tracked.json`'s entry without looking at the result, and `tracked._save` used one fixed
+`.tmp` name, so five hooks in one second raced `os.replace` (observed: `FileNotFoundError`,
+and on Windows `PermissionError`). Entries stay tracked until a report succeeds, and the
+temporary file is unique per process and thread with a short retry on replace.

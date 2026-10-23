@@ -6,14 +6,20 @@ Choices, and why:
   (sessions, identity map) without removing any logic.
 - **WAL mode.** The API serves reads (SSE clients, dashboard) while the ingest API writes.
   WAL lets readers proceed without blocking the writer.
-- **Threads.** FastAPI runs sync endpoints in a threadpool, so each request gets its own
-  connection rather than one shared object. `check_same_thread=False` is therefore required,
-  and is safe here because a single sqlite3 connection is never used by two threads at once.
+- **One connection per thread, and one writer at a time.** FastAPI runs sync endpoints in a
+  threadpool, so a single `Database` object is used from several threads at once. A sqlite3
+  connection cannot be: sharing one interleaves two requests' implicit transactions, and the
+  failure is not merely an error — a `rollback()` issued by one request can undo another's
+  `UPDATE` while that request's own `INSERT` still commits. That is how a session reported
+  `completed` was left `running` with a `status_changed → completed` event on its timeline
+  (§35). So the connection is thread-local, and `write()` opens it with `BEGIN IMMEDIATE` so
+  two writers queue instead of interleaving.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -249,14 +255,35 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(SCHEMA)
+        self._local = threading.local()
+        # Kept only so `close()` can reach connections created on other threads; sqlite3
+        # connections are not garbage collected promptly enough to rely on for file handles.
+        self._all: set[sqlite3.Connection] = set()
+        self._all_lock = threading.Lock()
+        conn = self._connection()
+        conn.executescript(SCHEMA)
         self._migrate()
-        self._conn.commit()
+
+    def _connection(self) -> sqlite3.Connection:
+        """This thread's connection, created on first use.
+
+        One connection per thread rather than one per process: see the module docstring. It is
+        also why `write()` can promise anything — two threads no longer share a transaction.
+
+        `isolation_level=None` turns off sqlite3's implicit `BEGIN`, so `write()` decides when
+        a transaction starts, which is what makes `BEGIN IMMEDIATE` possible.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
+            with self._all_lock:
+                self._all.add(conn)
+        return conn
 
     def _migrate(self) -> None:
         """Bring an existing database up to the current schema.
@@ -274,9 +301,11 @@ class Database:
         is no down-migration: a leftover column is harmless, and deciding when to remove one is
         how a migration ends up deleting data it cannot put back.
         """
-        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+        columns = {
+            row["name"] for row in self._connection().execute("PRAGMA table_info(sessions)")
+        }
         if "host" not in columns:
-            self._conn.execute("ALTER TABLE sessions ADD COLUMN host TEXT")
+            self._connection().execute("ALTER TABLE sessions ADD COLUMN host TEXT")
 
         # What a connector declares about being driven (§24). Defaulted rather than nullable,
         # so a row written by an older connector reads as "did not ask" instead of "unknown".
@@ -296,10 +325,12 @@ class Database:
         Each column's own presence is the marker, exactly like the `host` column above, so a
         second boot is a no-op and there is nothing to keep in sync.
         """
-        existing = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        existing = {
+            row["name"] for row in self._connection().execute(f"PRAGMA table_info({table})")
+        }
         for name, declaration in columns.items():
             if name not in existing:
-                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                self._connection().execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     @classmethod
     def open_read_only(cls, path: Path) -> "Database":
@@ -312,34 +343,54 @@ class Database:
         """
         instance = cls.__new__(cls)
         instance.path = path
-        instance._conn = sqlite3.connect(
-            f"file:{path}?mode=ro", uri=True, check_same_thread=False
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, check_same_thread=False, isolation_level=None
         )
-        instance._conn.row_factory = sqlite3.Row
-        instance._conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        # The instance has no `__init__`, so it has to carry the same per-thread scaffolding
+        # the normal constructor builds — otherwise `query()` would lazily open a *read-write*
+        # connection and the read-only promise would be gone.
+        instance._local = threading.local()
+        instance._local.conn = conn
+        instance._all = {conn}
+        instance._all_lock = threading.Lock()
         return instance
 
     def close(self) -> None:
-        self._conn.close()
+        """Close every connection this object opened, on whichever thread it was made."""
+        with self._all_lock:
+            connections, self._all = self._all, set()
+        for conn in connections:
+            conn.close()
 
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
-        """A connection with an enclosing transaction on success, rollback on exception."""
+        """A transaction that owns the write lock from its first statement.
+
+        `BEGIN IMMEDIATE` before anything is read, so two writers queue at the lock instead of
+        reading the same row and overwriting each other. Without it a `SELECT` inside the block
+        sees a snapshot another writer is about to change, and the stale value it writes back
+        is the lost update `docs/design.md` §35 records.
+        """
+        conn = self._connection()
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
 
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
-        return self._conn.execute(sql, params).fetchall()
+        return self._connection().execute(sql, params).fetchall()
 
     def query_one(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
-        return self._conn.execute(sql, params).fetchone()
+        return self._connection().execute(sql, params).fetchone()
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        return self._conn.execute(sql, params)
+        return self._connection().execute(sql, params)
 
 
 _db: Database | None = None
