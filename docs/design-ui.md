@@ -79,6 +79,11 @@ session 只报了机器名、但那台机器的 connector 从没注册过（`cpc
 现在绿色在三个地方都表示「活着」，completed 统一走中性默认——也就是卡片和侧栏一直在用的那个。
 `--live` / `--live-soft` 两个 token 已删除。
 
+**2026-10-24 补充：idle。** agent 完成一轮回复、但进程还开着时，状态仍然是 `running`，界面用
+中性色写 `idle`。它不是推断（`turn_completed` 是 agent 报的），所以圆点保持**实心**；它也不是
+「活着并且在干活」，所以不占绿色。绿色从此只回答一个问题：**它现在在工作吗**。侧栏的 Running
+筛选、节点标记、底栏计数和总览的 Running 瓦片都不再把它算进去。
+
 **约束 2 的适用范围也补了一处。** 空心点原本只画在侧栏行上，RUNNING NOW 的卡片**没有**
 `data-stale` 规则——它会画一个**实心点**，紧挨着「No activity reported」这行字。那正是约束 2
 要防的东西。现在卡片和行共用同一套：`data-stale="true"` → `background: transparent` +

@@ -146,6 +146,13 @@
   background: var(--warn);
 }
 
+/* Between replies: the agent reported that the turn ended, so the dot stays solid (it is not
+   an inference), but "alive and working" is no longer true, so the running green goes. After
+   the `[data-status="running"]` rule so it wins. */
+.card[data-idle="true"] .card__dot {
+  background: var(--quiet);
+}
+
 .card__agent {
   flex: 1 1 auto;
   min-width: 0;

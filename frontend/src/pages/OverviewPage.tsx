@@ -10,12 +10,14 @@
  *   1. blocked on the user   — nothing moves until you answer
  *   2. broken sessions       — you have to act on these
  *   3. running sessions      — the live board
- *   4. everything finished   — collapsed behind a disclosure, because it is history
+ *   4. idle sessions         — open, but the agent is between replies
+ *   5. everything finished   — collapsed behind a disclosure, because it is history
  *
- * The four tiles partition the board exactly (running + attention + finished = total), which
- * is why a session waiting on you is counted under *needs attention* and not under *running*
- * as well: it is running, but the tile row answers "where do things stand", and one session
- * counted in two buckets makes the numbers stop adding up.
+ * The tiles partition the board exactly (running + idle + attention + finished = total),
+ * which is why a session waiting on you is counted under *needs attention* and not under
+ * *running* as well, and why an idle one is counted under *idle* rather than *running*: it is
+ * running, but the tile row answers "where do things stand", and one session counted in two
+ * buckets makes the numbers stop adding up.
  *
  * When nothing needs attention the page says so in one line instead of padding the screen
  * with green checkmarks.
@@ -24,7 +26,7 @@
 import { useState } from "react";
 
 import { IconCheck, IconChevronRight, IconFolder } from "../components/icons";
-import { doingLine, isAwaitingUser, isBusy, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isIdle, relativeTime } from "../lib/format";
 import type { Session } from "../types/api";
 
 export function OverviewPage({
@@ -41,7 +43,17 @@ export function OverviewPage({
   const awaiting = sessions.filter(isAwaitingUser);
   const broken = sessions.filter((s) => s.status === "failed");
   const interrupted = sessions.filter((s) => s.status === "interrupted");
-  const running = sessions.filter((s) => isBusy(s) && !isAwaitingUser(s));
+  /*
+    `idle` is a reported display state, not a status (§36): the agent finished its last reply
+    and the process is still open. It is taken out of "running" here even though the status
+    column still says `running`, because this page answers "where does the work stand" — and
+    a session that is not working does not belong under "Running now". It is also not
+    "finished": nothing ended.
+  */
+  const idle = sessions.filter(isIdle);
+  const running = sessions.filter(
+    (s) => isBusy(s) && !isAwaitingUser(s) && !isIdle(s),
+  );
   const finished = sessions.filter(
     (s) => s.status === "completed" || s.status === "unknown",
   );
@@ -55,6 +67,9 @@ export function OverviewPage({
     <div className="overview">
       <div className="stats">
         <Stat n={running.length} label="Running" tone="live" />
+        {/* Only when there is something to say. A zero tile is noise, and the point of this
+            row is "where does the work stand", not a fixed dashboard skeleton. */}
+        {idle.length > 0 && <Stat n={idle.length} label="Idle" />}
         <Stat
           n={needsAttention.length}
           label="Needs attention"
@@ -85,7 +100,19 @@ export function OverviewPage({
           </div>
         </>
       ) : (
+        idle.length === 0 &&
         needsAttention.length === 0 && <AllClear />
+      )}
+
+      {idle.length > 0 && (
+        <>
+          <p className="section-label section-label--spaced">Idle</p>
+          <div className="cards cards--running">
+            {idle.map((session) => (
+              <SessionCard key={session.id} session={session} onOpen={onOpen} />
+            ))}
+          </div>
+        </>
       )}
 
       {finished.length > 0 && (
@@ -160,13 +187,12 @@ function SessionCard({
 }) {
   const awaiting = isAwaitingUser(session);
   /*
-    A session waiting on an answer is usually quiet for a long time — that is what waiting
-    looks like — so the two states collide on exactly the case that matters. Waiting wins:
-    "blocked on your permission prompt" is what the agent reported, and staleness is only an
-    inference from silence, so letting the inference overwrite the report would hide the one
-    line that tells you what to do. Same rule as design-ui.md §2, applied to the card.
+    A session between replies is quiet by definition, so the same collision as waiting: the
+    agent reported that it finished, and that report must not be overwritten by "no activity
+    reported", which is only an inference from the silence that followed.
   */
-  const stale = session.possibly_stale && isBusy(session) && !awaiting;
+  const idle = isIdle(session);
+  const stale = session.possibly_stale && isBusy(session) && !awaiting && !idle;
 
   return (
     <button
@@ -174,6 +200,7 @@ function SessionCard({
       data-status={session.status}
       data-stale={stale}
       data-awaiting={awaiting}
+      data-idle={idle}
       onClick={() => onOpen(session.id)}
       title={session.title}
     >

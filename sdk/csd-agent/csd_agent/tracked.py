@@ -49,6 +49,11 @@ class Tracked:
     #: than the window — which is exactly the long-running session the heartbeat exists to
     #: keep alive. Pruning on *contact* drops only what has become unreachable.
     last_seen_at: float = 0.0
+    #: Replies finished in this conversation as far as this connector has seen. It exists to
+    #: make a turn's reports unique: `cpctl` derives its idempotency key from the message, and
+    #: two turns that carry the same prompt text ("continue") would otherwise collapse into a
+    #: single timeline row. A resumed conversation keeps counting rather than restarting.
+    turn: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +82,7 @@ def load() -> dict[str, Tracked]:
                 cwd=raw.get("cwd", ""),
                 started_at=started,
                 last_seen_at=float(raw.get("last_seen_at") or started),
+                turn=int(raw.get("turn") or 0),
             )
         except (KeyError, TypeError, ValueError):
             # A malformed row is dropped rather than crashing a hook. Losing one tracked

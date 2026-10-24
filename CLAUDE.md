@@ -66,6 +66,15 @@ token, and host).
 Open **:5173**, not :8780 — Vite proxies `/api` to the backend, so there is no CORS and no
 hardcoded API address in the frontend.
 
+Production does not run the working tree. A release is a tag plus an artifact, and `deploy`
+ships an artifact that already exists on disk (design.md §30):
+
+```bash
+./release.sh cut v0.2.0     # refuses a dirty tree; tests; builds dist; tags; releases/v0.2.0.tgz
+./release.sh deploy v0.2.0  # needs CSD_DEPLOY_HOST=user@host; verifies /srv/csd/VERSION
+./release.sh status | list | rollback
+```
+
 ```bash
 # Tests — run from backend/. The venv is at backend/.venv (Scripts/ on Windows, bin/ on Linux)
 cd backend && .venv/Scripts/python -m pytest
@@ -178,6 +187,11 @@ of your problems.
 - **`awaiting_user` is an event, not a status.** A blocked session stays `running`; the UI
   reads the newest *display* event. That is what lets it clear itself — a status would be
   sticky and a session that was merely waiting could never be reported as working again.
+- **`turn_completed` (idle) is the same shape, for a different fact.** An editor keeps one
+  Claude Code process alive for days, so `SessionEnd` cannot say the agent stopped working;
+  `Stop` reports the reply boundary as an event, the UI shows `idle` while the status stays
+  `running`, and the next `progress` event clears it. Never a sixth status, never a
+  `session finish` (§36).
 - **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` but
   **not** `updated_at`, and is excluded from timelines and from `last_event`. Otherwise 40
   pings during a test run bury the last thing the user actually did.
@@ -612,7 +626,8 @@ firewall of its own. Run `deploy/scripts/tailscale-prefly.sh` before and after a
   "why" in Chinese plus the quick start.** Keep the two consistent when commands or supported
   agents change — the Chinese file is a guide, not a translation of every section.
 - Do not wire Claude Code's `Stop` hook to session end: it fires per *reply*, and with sticky
-  terminal states every session would go permanently "finished" seconds after opening.
+  terminal states every session would go permanently "finished" seconds after opening. It
+  reports `turn_completed` instead (§36).
 
 ## Where this is going
 

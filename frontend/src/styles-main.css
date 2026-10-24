@@ -125,6 +125,15 @@
   color: var(--warn);
 }
 
+/* Between replies: reported (Claude Code said the reply ended), so it keeps a fill rather
+   than the dashed stale treatment — but it is not alive, so it does not get the running
+   green. The word on the pill is what carries it. Placed after the `running` rule so it
+   wins, exactly like `awaiting` does on the cards. */
+.status[data-idle="true"] {
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
 /* Inferred staleness never looks like a reported status: no fill, dashed edge. The doubled
    class beats the `[data-status]` fills above without an `!important`. */
 .status.status--stale {
@@ -348,6 +357,11 @@
   border-color: var(--warn);
   background: var(--warn);
 }
+/* A turn boundary — the agent finished a reply. Hollow accent rather than a filled dot: it
+   marks punctuation between turns, not an outcome, and a filled marker would read as one. */
+.ev[data-kind="turn"]::before {
+  border-color: var(--accent);
+}
 
 .ev__row {
   display: flex;
@@ -422,6 +436,12 @@
 .notice--bad {
   background: var(--dead-soft);
   color: var(--dead);
+}
+/* Neither a warning nor a failure: the session is fine, it is just between replies. Quiet
+   enough that it does not compete with an `awaiting_user` notice, which needs an answer. */
+.notice--quiet {
+  background: var(--surface-2);
+  color: var(--ink-3);
 }
 
 .notice__btn {

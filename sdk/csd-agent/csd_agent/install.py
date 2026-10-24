@@ -42,10 +42,10 @@ LOCAL_ENV_FILE = Path("/etc/csd/csd.env")
 #: to this install and appears in no hand-written hook.
 HOOK_MARKER = str(config.bin_dir() / "csd-hook")
 
-#: Which Claude Code events we wire. `Stop` is absent on purpose — it fires per reply, not
-#: per session, and wiring it to a session end would make every session terminal after its
-#: first answer (see csd_agent/hooks.py for the full argument).
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Notification", "SessionEnd")
+#: Which Claude Code events we wire. `Stop` is a **turn** boundary and reports an event, never
+#: a session end: it fires per reply, and wiring it to a status would make every session
+#: terminal after its first answer (see csd_agent/hooks.py for the full argument).
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd")
 
 #: Seconds Claude Code waits for a hook before giving up. cpctl is capped at 2 s per attempt
 #: and one retry by the wrapper, so this is a backstop for a wedged interpreter.

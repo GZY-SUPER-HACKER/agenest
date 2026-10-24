@@ -15,6 +15,7 @@ export type EventKind =
   | "failed"
   | "interrupted"
   | "awaiting"
+  | "turn"
   | "progress"
   | "note";
 
@@ -30,6 +31,8 @@ export function eventKind(type: EventType): EventKind {
       return "interrupted";
     case "awaiting_user":
       return "awaiting";
+    case "turn_completed":
+      return "turn";
     default:
       return "progress";
   }
@@ -85,6 +88,30 @@ export function isAwaitingUser(session: Session): boolean {
   return (
     session.status === "running" && session.last_event?.event_type === "awaiting_user"
   );
+}
+
+/**
+ * Has the agent finished its last reply while the session is still open?
+ *
+ * A turn boundary is **reported**, not inferred: Claude Code fires `Stop` when a reply ends,
+ * and an interactive editor keeps one process alive for days, so `SessionEnd` is not what
+ * tells you the agent stopped working. Read off the newest display event, exactly like
+ * `isAwaitingUser` — and that is what makes it clear itself. The next prompt reports a
+ * `progress` event, which supersedes this one; no flag to reset, no expiry to tune.
+ *
+ * It is deliberately not a `SessionStatus`: the session *is* still running (the process is
+ * open), it is just not working, which is the distinction the card needs and the status
+ * column must not carry (docs/design.md §36).
+ */
+export function isIdle(session: Session): boolean {
+  return (
+    session.status === "running" && session.last_event?.event_type === "turn_completed"
+  );
+}
+
+/** The status a person should read. `idle` is a reported display state, not a status. */
+export function statusLabel(session: Session): string {
+  return isIdle(session) ? "idle" : STATUS_LABEL[session.status];
 }
 
 export function relativeTime(iso: string | null): string {
