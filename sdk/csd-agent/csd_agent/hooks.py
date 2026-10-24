@@ -15,10 +15,10 @@ stdin. This module turns those payloads into `cpctl` calls. It is the only piece
 | Event | What we do | Why |
 |---|---|---|
 | `SessionStart` | create the session (or reuse it, on resume) | the only place a session can begin |
-| `UserPromptSubmit` | set the real title | `SessionStart` fires before the user has typed anything, so its title is a placeholder, and the title is what makes the list readable |
+| `UserPromptSubmit` | set the real title, and report a `progress` event | `SessionStart` fires before the user has typed anything, so its title is a placeholder; the prompt is also the only reliable "working on X" signal between the two ends of a turn |
+| `Stop` | report a `turn_completed` event — **never a status** | Claude Code finished a reply, not the session. See below |
 | `SessionEnd` | `finish --status completed` | a clean exit; a crash does not fire this at all |
 | `Notification` | report an `awaiting_user` event | this is Claude Code saying it wants a human — the single most useful thing on a phone |
-| `Stop` | **nothing** | see below |
 | `PostToolUse`, `PreToolUse`, `SubagentStop`, `PreCompact` | nothing by default | volume, and the payload implications documented in the README |
 
 ### `Notification` reports an event, not a status
@@ -33,7 +33,7 @@ session, so the next thing the session reports — the user's prompt, another pr
 supersedes it with no bookkeeping and no clear-protocol to forget. It also cannot leak into
 `status`, so the terminal-state rules in docs/design.md §3 stay untouched.
 
-### `Stop` must not mean "finished"
+### `Stop` is a turn boundary, not a session end
 
 `Stop` fires every time Claude Code finishes *a reply* — many times per session, the first
 of them seconds after the session opens. Wiring it to `session finish` would make every
@@ -41,6 +41,16 @@ session terminal after its first answer, and worse than that it would be permane
 backend's terminal states are sticky and first-write-wins (design.md §3), so every event
 after that would be silently discarded and the dashboard would show a wall of finished
 sessions that are all still running. `SessionEnd` is the event that ends a session.
+
+But doing *nothing* was wrong in the other direction, and an interactive editor makes it
+obvious: a VS Code window keeps one Claude Code process alive for days, so `SessionEnd` does
+not fire between prompts, and the dashboard showed `running` for hours after the agent had
+finished its work. The honest report is the one Claude Code already gives us — *this reply is
+finished*. It goes out as a `turn_completed` **event**, which moves no status. The UI reads it
+the same way it reads `awaiting_user` (§16b): a display state (`idle`) that supersedes the
+previous event and clears itself the moment the user's next prompt arrives. The session stays
+`running` because it is still open, which is true; the card no longer claims it is working,
+which was the lie (design.md §36).
 
 ### `SessionEnd` is not guaranteed, which is why the pid exists
 
@@ -112,6 +122,7 @@ def on_session_start(payload: dict) -> None:
             cwd=cwd,
             started_at=existing.started_at,
             last_seen_at=existing.last_seen_at,
+            turn=existing.turn,
         ))
         runtime.cpctl("event", "--session", existing.csd_session_id, "--type", "heartbeat",
                       "-m", "session resumed")
@@ -183,6 +194,41 @@ def on_user_prompt(payload: dict) -> None:
     _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
          else f"UserPromptSubmit: cpctl failed: {result.detail}")
 
+    # The prompt is the only thing that says "the agent is now working on X": `SessionStart`
+    # fired hours ago, and `Stop` only says the turn is over. Without this the timeline of a
+    # long interactive session contains a single line. The turn number in the message keeps
+    # two identical prompts ("continue") from being deduplicated into one row by `cpctl`'s
+    # message-derived key — and it is what lets `Stop` name which turn it is closing.
+    entry.turn += 1
+    tracked.put(entry)
+    progress = runtime.cpctl("event", "--session", entry.csd_session_id,
+                             "--type", "progress",
+                             "-m", f"Turn {entry.turn}: {title}")
+    if not progress.ok:
+        _log(f"UserPromptSubmit: progress event failed: {progress.detail}")
+
+
+def on_stop(payload: dict) -> None:
+    """Claude Code finished a reply. Say so; change nothing else.
+
+    Not `session finish` — see the module docstring. The event is what lets the page stop
+    claiming the agent is working while the process is merely open, which in an editor is the
+    normal state between prompts. It is fire-and-forget: a dashboard that is down must not
+    hold the agent, and no state here depends on the report landing.
+    """
+    entry = _entry_for(payload)
+    if entry is None:
+        return
+    # `turn` is bumped by the prompt that opened it. A reply with no prompt in this tracker
+    # (a resumed conversation before its first prompt) still deserves the boundary, and
+    # naming it "turn 1" keeps the wording sane without inventing a new counter.
+    turn = entry.turn or 1
+    result = runtime.cpctl("event", "--session", entry.csd_session_id,
+                           "--type", "turn_completed",
+                           "-m", f"Reply finished (turn {turn})")
+    _log(f"Stop: turn {turn} finished" if result.ok
+         else f"Stop: cpctl failed: {result.detail}")
+
 
 def on_notification(payload: dict) -> None:
     """Claude Code wants a human. Report that as its own event type.
@@ -252,6 +298,7 @@ def _now() -> float:
 HANDLERS = {
     "SessionStart": on_session_start,
     "UserPromptSubmit": on_user_prompt,
+    "Stop": on_stop,
     "Notification": on_notification,
     "SessionEnd": on_session_end,
 }
@@ -259,7 +306,6 @@ HANDLERS = {
 #: Events we knowingly do nothing about. Listed so that "we forgot" and "we decided" read
 #: differently in a log — the whole point of writing the decision down.
 IGNORED = {
-    "Stop": "fires per reply, not per session; see the module docstring",
     "PreToolUse": "per-tool volume; enable deliberately if you want it",
     "PostToolUse": "per-tool volume; enable deliberately if you want it",
     "PostToolUseFailure": "per-tool volume; enable deliberately if you want it",

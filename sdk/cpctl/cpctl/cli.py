@@ -471,6 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
             "progress",
             "note",
             "awaiting_user",
+            "turn_completed",
             "session_completed",
             "session_failed",
             "session_interrupted",

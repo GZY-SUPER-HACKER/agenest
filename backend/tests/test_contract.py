@@ -536,6 +536,52 @@ def test_late_awaiting_user_cannot_reopen_a_terminal_session(
     assert any(e["event_type"] == "awaiting_user" for e in detail["events"])
 
 
+# --------------------------------------------------------------------------- #
+# turn_completed: a reply boundary, and it moves no status                    #
+# --------------------------------------------------------------------------- #
+def test_turn_completed_leaves_the_status_running(
+    session_id: str, client: TestClient
+) -> None:
+    """A finished reply is not a finished session.
+
+    An interactive editor keeps one Claude Code process alive for days, so `SessionEnd` does
+    not fire between prompts. `Stop` reports the turn boundary as this event; the status stays
+    `running`, because the process really is still open (docs/design.md §36).
+    """
+    r = report(client, session_id, "turn_completed", "Reply finished (turn 1)")
+    assert r.status_code == 202
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "running"
+    assert body["finished_at"] is None
+    assert body["last_event"]["event_type"] == "turn_completed"
+
+
+def test_a_new_prompt_supersedes_turn_completed(
+    session_id: str, client: TestClient
+) -> None:
+    """Idle clears itself exactly like waiting does: the next display event replaces it.
+
+    The UI reads the newest event, so the prompt the user sends is what ends the idle state —
+    no flag to reset, and no expiry that could leave a working session looking idle.
+    """
+    report(client, session_id, "turn_completed", "Reply finished (turn 1)")
+    report(client, session_id, "progress", "Turn 2: continue")
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "running"
+    assert body["last_event"]["event_type"] == "progress"
+
+
+def test_late_turn_completed_cannot_reopen_a_terminal_session(
+    session_id: str, client: TestClient
+) -> None:
+    """Sticky terminals outrank a turn boundary, like every other late event."""
+    report(client, session_id, "session_completed", "done")
+    report(client, session_id, "turn_completed", "late reply boundary")
+    detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert detail["status"] == "completed"
+    assert any(e["event_type"] == "turn_completed" for e in detail["events"])
+
+
 def test_list_carries_last_event_for_every_session(client: TestClient) -> None:
     """The rail renders a whole page from one payload; it must not need N+1 requests."""
     ids = []

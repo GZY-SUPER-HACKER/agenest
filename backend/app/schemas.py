@@ -61,6 +61,11 @@ class EventType(str, Enum):
     #: right now, while `status` describes how the session ends. Marking it terminal would
     #: make it sticky, and a session that is merely waiting would never come back.
     awaiting_user = "awaiting_user"
+    #: The agent finished *a reply*, and the session is still open. Claude Code's `Stop` hook
+    #: fires here, once per answer, while the process may live for days — so this is a turn
+    #: boundary, never a lifecycle signal (docs/design.md §15, §36). The UI reads it to render
+    #: `idle` beside the session's reported `running`; it moves no status.
+    turn_completed = "turn_completed"
     session_completed = "session_completed"
     session_failed = "session_failed"
     session_interrupted = "session_interrupted"
@@ -89,6 +94,7 @@ NON_TERMINAL_EVENTS = frozenset(
         EventType.progress,
         EventType.note,
         EventType.awaiting_user,
+        EventType.turn_completed,
         EventType.heartbeat,
     }
 )

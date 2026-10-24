@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { IconChevronDown, IconPanel } from "./icons";
-import { doingLine, isAwaitingUser, isBusy, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isIdle, relativeTime } from "../lib/format";
 import {
   buildTree,
   HOST_STATE_LABEL,
@@ -64,10 +64,14 @@ function saveCollapsed(state: Collapsed): void {
 
 const FRESH_MS = 6000;
 
-type StatusFilter = "all" | "running" | "failed" | "done";
+type StatusFilter = "all" | "running" | "idle" | "failed" | "done";
 
 const FILTERS: Array<{ key: StatusFilter; label: string }> = [
   { key: "running", label: "Running" },
+  // Beside "Running", not under it: an idle session has a `running` status (its process is
+  // open) but the agent is between replies, and the rail's question is what is happening
+  // *now* (docs/design.md §36). Leaving it in "Running" is the reading this split fixes.
+  { key: "idle", label: "Idle" },
   { key: "done", label: "Done" },
   { key: "failed", label: "Failed" },
   { key: "all", label: "All" },
@@ -76,7 +80,9 @@ const FILTERS: Array<{ key: StatusFilter; label: string }> = [
 function matchesFilter(session: Session, filter: StatusFilter): boolean {
   switch (filter) {
     case "running":
-      return session.status === "running";
+      return session.status === "running" && !isIdle(session);
+    case "idle":
+      return isIdle(session);
     case "failed":
       return session.status === "failed" || session.status === "interrupted";
     case "done":
@@ -140,7 +146,10 @@ export function Rail({
   const toggleHarness = useCallback((key: string) => toggle("harnesses", key), [toggle]);
   const toggleProject = useCallback((key: string) => toggle("projects", key), [toggle]);
 
-  const totalRunning = sessions.filter(isBusy).length;
+  // "Running" in this footer means *working*. An idle session has a running status but the
+  // agent is between replies (§36), and this line is the rail's summary of what is happening.
+  const working = sessions.filter((s) => isBusy(s) && !isIdle(s)).length;
+  const idleSessions = sessions.filter(isIdle).length;
   // Counted from the registry, not the tree: a connected host whose sessions are hidden by the
   // active filter is still connected, and the footer is about machines.
   const connectedHosts = hosts.filter((h) => !h.disconnected_at && !h.possibly_stale).length;
@@ -209,7 +218,12 @@ export function Rail({
           </span>
           <span>
             {connectedHosts > 0 && `${connectedHosts} host${connectedHosts === 1 ? "" : "s"} · `}
-            {totalRunning > 0 ? `${totalRunning} running` : "idle"}
+            {[
+              working > 0 ? `${working} running` : null,
+              idleSessions > 0 ? `${idleSessions} idle` : null,
+            ]
+              .filter(Boolean)
+              .join(", ") || "idle"}
           </span>
         </div>
       </aside>
@@ -430,7 +444,10 @@ function SessionRow({
   // by definition, and the hollow "we don't know" marker would be a strange thing to draw on
   // the one row that is telling us exactly what it wants. See OverviewPage's SessionCard.
   const awaiting = isAwaitingUser(session);
-  const stale = session.possibly_stale && isBusy(session) && !awaiting;
+  // A finished reply is a report too, and it beats the inference drawn from the quiet that
+  // follows it. Same resolution as `awaiting`, same reason (OverviewPage's SessionCard).
+  const idle = isIdle(session);
+  const stale = session.possibly_stale && isBusy(session) && !awaiting && !idle;
 
   return (
     <button
@@ -438,6 +455,7 @@ function SessionRow({
       data-status={session.status}
       data-stale={stale}
       data-awaiting={awaiting}
+      data-idle={idle}
       data-fresh={fresh}
       aria-current={active}
       onClick={() => onSelect(session.id)}

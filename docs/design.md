@@ -286,6 +286,8 @@ This is written down because it is a harness-specific trap, not a general princi
 nanobot adapter (`csd_nanobot.py`) has the mirror-image hazard in its turn-level hooks, and
 the same rule — a per-turn signal is never a lifecycle signal — is what resolves both.
 
+Reporting the boundary *as an event* is a different question, and §36 answers it.
+
 ## 16. The one write, and why it is not a control surface
 
 `POST /api/sessions/{id}/close` is the first thing in this project that a *person* can do from
@@ -1785,6 +1787,44 @@ old-attachment cleanup (the files are the transcript's record; a retention polic
 operator's decision, not a default), resumable uploads, and sending a file to a *coding agent* on
 another machine. That last one is a different path — it would go over the agent's own `ssh`, not
 over this channel — and is not implied by this one.
+## 30. What runs in production is a release, not a working directory
+
+There were already two instances, and they were already separate: `dev.sh` writes
+`backend/data` and listens on 8780/5173, the cloud unit writes `/srv/csd/data` and listens on
+its own loopback. Different databases, different ingest tokens, different hosts. What was not
+separated was the **code**: the documented deploy path made a tarball from the working tree, so
+whatever happened to be half-finished at that moment became production. A dirty tree is the
+normal state of a repository being developed, which made "the version I use every day" depend
+on when someone last ran `tar`.
+
+**A release is a tag and an artifact.** `release.sh cut <tag>` refuses anything but a clean
+tree, runs the backend suite, builds the frontend from that same commit, writes
+`releases/<tag>.tgz` from `git archive`, and only then creates the tag. `deploy` ships an
+artifact that already exists; it never re-reads the working tree. `deploy.sh` records the
+version at `/srv/csd/VERSION` and the shipper reads it back over ssh, so "it deployed" is a
+checked fact rather than an exit code.
+
+**Why a tag and not a branch.** A branch is a moving name; "deploy main" is the working-tree
+problem with an extra step. A tag names one commit, and an artifact is what makes rollback a
+re-upload rather than a rebuild from a checkout someone has to reconstruct.
+
+**Why `git archive` rather than `tar --exclude`.** The old flow's exclude list was
+load-bearing: forgetting one entry shipped `.env` or the SQLite database. `git archive` can
+only carry tracked files, so secrets and local state are absent by construction rather than by
+a filter someone has to maintain. The build product (`frontend/dist`) is added deliberately,
+because the server has no Node.
+
+Rejected: **a staging instance on the same host, as the default second step.** For the
+dashboard half it would work; for the agent half it would not be the same agent — a second
+`native` process has its own workspace and memory, and a second client on the same nanobot is
+a different conversation. A staging box that cannot exercise the thing being changed is a
+ritual. Fast rollback is the answer until a change is genuinely deployment-specific (systemd,
+Tailscale, Pi on Linux); then a staging unit is worth adding on its own merits.
+
+The **data is never part of a release**. `/srv/csd/data` survives an install, and migrations
+are additive with no down-migration, so old code tolerates a newer schema — which is what makes
+code rollback safe to offer as one command.
+
 ## 31. Pi reports runs, and the personal agent it also powers stays silent
 
 Standalone `pi` is a coding agent and follows §13's shape: the machine running it originates the
@@ -2049,3 +2089,44 @@ The same audit found the connector side of the same shape: `on_session_end` drop
 `.tmp` name, so five hooks in one second raced `os.replace` (observed: `FileNotFoundError`,
 and on Windows `PermissionError`). Entries stay tracked until a report succeeds, and the
 temporary file is unique per process and thread with a short retry on replace.
+
+
+## 36. A reply boundary is an event, so `idle` is a display state
+
+An interactive editor keeps one Claude Code process alive for days: the VS Code extension
+starts it once and reuses it for every prompt, so `SessionEnd` fires when you close the
+window, not when the agent finishes your task. The result was a dashboard that said `running`
+for hours after the work had stopped — the one question this page exists to answer, answered
+wrongly.
+
+The fact was already being reported. Claude Code fires `Stop` when a reply ends. §15 explains
+why that must not *close* the session; it does not explain why it should be thrown away. It now
+travels as a `turn_completed` **event**, and the page reads it the same way it reads
+`awaiting_user` (§16b): the newest display event decides a display state called **idle**.
+Self-clearing for the same reason — the next prompt reports a `progress` event that supersedes
+it, so there is no flag to reset and no expiry to tune.
+
+- **The status is untouched.** The session really is still open, so `running` remains the
+  truthful status. `idle` is what the newest event says about *now*, and it is never written
+  into the status column: closing the window still produces `completed` from `SessionEnd`, and
+  the heartbeat still closes a killed process as `interrupted`.
+- **A prompt is progress.** With `PostToolUse` deliberately unwired (the README's privacy
+  argument), a long session's timeline otherwise held a single line. `UserPromptSubmit` now
+  reports `Turn N: <first line of the prompt>` — the only honest "working on X" the connector
+  has between the two ends of a turn. The turn number is in the message because `cpctl` derives
+  its idempotency key from the message: two turns with the same prompt text ("continue") would
+  otherwise collapse into one row.
+- **It is reported, not inferred.** The page never decides a session is idle because nothing
+  has happened recently; quiet is still `possibly_stale`. Idle comes from a `Stop` Claude Code
+  fired, which is why it outranks staleness on the card, in the rail, and on the detail page.
+- **The word matters.** `idle` is drawn with the neutral palette and its own label, not the
+  running green: alive-but-not-working is a different claim from alive-and-working, and the
+  rail's `Running` filter, its node markers, the footer and the overview's tiles all count it
+  separately.
+
+Rejected: **`Stop` → `session finish`.** §15, and it is unrecoverable — terminal states are
+sticky, so the same process's next prompt could never be shown as running again. Rejected:
+**inferring idle from silence.** That is a guess with a timer attached, and the guess is wrong
+for every long tool call. Rejected: **a sixth `SessionStatus`.** An idle session is still
+running; two answers to "is it running" would force every later reader of the status column to
+choose between them — §20's argument about hosts, applied to a value.

@@ -316,7 +316,7 @@ on every heartbeat, so it also keeps saying so; a box that is switched off stops
 from and reads as "maybe offline" rather than as a status nobody sent.
 
 See [its README](sdk/csd-agent/README.md) for what the probe may and may not say, and why
-Claude Code's `Stop` hook is deliberately not wired.
+Claude Code's `Stop` hook reports a turn boundary instead of ending the session.
 
 ### Option B: wrap it (no changes to the agent)
 
@@ -779,6 +779,13 @@ express it. That is what lets it clear itself — the dashboard reads the newest
 so the next thing the session reports replaces it. Promoting it to a status would make it
 sticky, and a session that was only waiting could never be reported as running again.
 
+**Idle is the same idea, for a finished reply.** An interactive editor keeps one Claude Code
+process alive for days, so `SessionEnd` cannot tell you the agent stopped working. The
+connector reports `turn_completed` when a reply ends; the page shows **idle** while the status
+stays `running`, and the next prompt (`progress`) clears it. A session that is open but not
+working is neither "running now" nor finished, so it gets its own count in the overview and
+its own filter chip in the rail.
+
 **SSE is a notification, not a record.** The stream carries `id:` (a database event id) so a
 reconnecting client resumes with `?cursor=<id>`. A client that was away longer than the
 replay buffer (2048 frames) re-fetches `/api/sessions/{id}/events`; the stream alone is never
@@ -826,6 +833,19 @@ The supported shape is one long-lived process on a small Linux host, bound to
 `127.0.0.1:8780`, serving the built frontend from the same process. `deploy/deploy.sh` performs
 the whole install — venv, service user, code, static files, `/etc/csd/csd.env`, systemd unit,
 restart, verification — and is re-runnable, so the same command is the upgrade path.
+
+Day to day, **production runs a release, not your working tree**:
+
+```bash
+export CSD_DEPLOY_HOST=root@<dashboard-host>
+./release.sh cut v0.2.0     # clean tree + tests + build, then tag and write releases/v0.2.0.tgz
+./release.sh deploy v0.2.0  # ship that artifact; the server records it in /srv/csd/VERSION
+./release.sh rollback       # re-deploy the release before the current one
+```
+
+`cut` refuses a dirty tree, so a half-finished feature cannot reach production by accident.
+The manual tarball flow below remains the fallback; it produces an unversioned build, which
+the installer says out loud.
 
 ```bash
 # 0. build the frontend wherever npm exists (the server itself needs no node)

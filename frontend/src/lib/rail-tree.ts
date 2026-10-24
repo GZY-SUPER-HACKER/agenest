@@ -20,7 +20,7 @@
  * A session with no host at all collects under "no host recorded" — a bucket, not a guess.
  */
 
-import { isBusy } from "./format";
+import { isBusy, isIdle } from "./format";
 import type { Host, Session } from "../types/api";
 
 /** The bucket for sessions that never said which machine they ran on. */
@@ -82,6 +82,14 @@ export function hostState(host: Host | null): HostState {
   return host.possibly_stale ? "stale" : "connected";
 }
 
+/**
+ * How many sessions under this node are *working* — running and not between replies. A node's
+ * marker is the rail's at-a-glance "something is happening here", so an idle session must not
+ * light it up: it is the same claim the Running filter and the session row make (§36).
+ */
+const workingCount = (rows: Session[]): number =>
+  rows.filter((s) => isBusy(s) && !isIdle(s)).length;
+
 function harnessesFor(agentTypes: string[], sessions: Session[]): HarnessNode[] {
   // Sessions first, so the order the server gave (running first, newest first) survives; a
   // reported-but-idle harness is appended, because it has no ordering of its own.
@@ -107,14 +115,14 @@ function harnessesFor(agentTypes: string[], sessions: Session[]): HarnessNode[] 
       key: `${name}/${pname}`,
       name: pname,
       sessions: rows,
-      running: rows.filter(isBusy).length,
+      running: workingCount(rows),
     }));
     return {
       key: name,
       name,
       projects: nodes,
       sessions: list,
-      running: list.filter(isBusy).length,
+      running: workingCount(list),
       failed: list.filter((s) => s.status === "failed").length,
       connectedOnly: list.length === 0,
     };
@@ -169,7 +177,7 @@ export function buildTree(sessions: Session[], hosts: Host[]): HostNode[] {
       host: mostLive(registered),
       harnesses: harnessesFor(registered.map((h) => h.agent_type), rows),
       sessions: rows,
-      running: rows.filter(isBusy).length,
+      running: workingCount(rows),
       failed: rows.filter((s) => s.status === "failed").length,
       accessNeeds: needsAccess(registered),
     });
@@ -184,7 +192,7 @@ export function buildTree(sessions: Session[], hosts: Host[]): HostNode[] {
       host: null,
       harnesses: harnessesFor([], rows),
       sessions: rows,
-      running: rows.filter(isBusy).length,
+      running: workingCount(rows),
       failed: rows.filter((s) => s.status === "failed").length,
       // Nothing registered, so nothing to authorize: a machine nobody has connected from
       // cannot be asking to be driven.

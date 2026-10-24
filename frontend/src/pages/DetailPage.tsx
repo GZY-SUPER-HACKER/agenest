@@ -28,8 +28,9 @@ import {
   eventKind,
   isAwaitingUser,
   isBusy,
+  isIdle,
   relativeTime,
-  STATUS_LABEL,
+  statusLabel,
 } from "../lib/format";
 import type { SessionEvent } from "../types/api";
 
@@ -68,8 +69,13 @@ export function DetailPage({
     the server's answer to that question, and it is the same field the card grouped on.
   */
   const awaiting = isAwaitingUser(detail);
+  /*
+    A finished reply outranks silence for the same reason waiting does: the agent told us it
+    stopped working, and "maybe offline" is only an inference from it being quiet afterwards.
+  */
+  const idle = isIdle(detail);
   // Waiting beats stale, for the same reason as on the card: a report outranks an inference.
-  const stale = detail.possibly_stale && isBusy(detail) && !awaiting;
+  const stale = detail.possibly_stale && isBusy(detail) && !awaiting && !idle;
 
   return (
     <article className="detail">
@@ -84,9 +90,10 @@ export function DetailPage({
         <span
           className={`status${stale ? " status--stale" : ""}`}
           data-status={detail.status}
+          data-idle={idle}
           title={stale ? "As last reported; no activity since" : undefined}
         >
-          {STATUS_LABEL[detail.status]}
+          {statusLabel(detail)}
         </span>
       </header>
 
@@ -101,6 +108,21 @@ export function DetailPage({
           <span>
             Waiting on you. The newest event below is a request, not progress — nothing moves
             until it is answered.
+          </span>
+        </div>
+      )}
+
+      {idle && (
+        /*
+          Why the pill says "idle" while the session is still `running`: those answer two
+          different questions. The process is open (status); the agent is not working (the
+          newest event, which Claude Code reported). Saying it is what keeps "idle" from
+          reading as a status the dashboard invented (docs/design.md §36).
+        */
+        <div className="notice notice--quiet" role="status">
+          <span>
+            The last reply finished. The session stays open — it ends when the Claude Code
+            process exits — and your next prompt starts a new turn.
           </span>
         </div>
       )}
@@ -154,7 +176,12 @@ export function DetailPage({
         </section>
       )}
 
-      {isBusy(detail) && (
+      {/*
+        Not offered while idle: this box's premise is "nothing is going to report an outcome",
+        and for an idle session that is false — the heartbeat closes it when the process goes
+        away. Offering it would invite marking a live session interrupted.
+      */}
+      {isBusy(detail) && !idle && (
         <CloseAction sessionId={detail.id} onClosed={() => void reload()} />
       )}
 

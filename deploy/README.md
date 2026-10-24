@@ -44,6 +44,42 @@ ssh <user>@<dashboard-host> \
   old one leaves files the new version no longer has, and `rsync --delete` faithfully deploys
   them — a module removed weeks earlier can reappear as a feature. Empty the staging tree first.
 
+## Releasing: production runs an artifact, not a working tree
+
+The manual flow above ships whatever is in your working directory. That is fine for a one-off,
+but on the dashboard you actually use every day it is the wrong default: a half-finished feature,
+or an untracked file that was never committed, can reach production and there is nothing on the
+server to tell you which code is running.
+
+`release.sh` closes both gaps. A release is a **tag plus a tarball**; deploy ships the tarball
+and records its version on the server.
+
+```bash
+export CSD_DEPLOY_HOST=root@<dashboard-host>
+
+./release.sh cut v0.2.0     # refuses a dirty tree; runs tests; builds dist; tags; writes releases/v0.2.0.tgz
+./release.sh deploy v0.2.0  # scp + install; verifies /srv/csd/VERSION reports v0.2.0
+./release.sh status         # what version the server is actually running
+./release.sh list           # artifacts kept locally, and the deploy history
+./release.sh rollback       # re-deploy the release before the current one
+```
+
+What makes it safe, in order:
+
+- **`cut` refuses a dirty tree** — unstaged, staged, or untracked files. `git archive` only
+  carries tracked files, so an untracked module would be silently missing from the tarball and
+  fail on the server instead of here.
+- **The frontend is built from the same commit** and copied into the tarball. The server has no
+  Node; a `dist/` from a different tree is how the UI and the API drift apart.
+- **The version is verified, not assumed.** `deploy.sh` writes `/srv/csd/VERSION` from the
+  tarball, and `release.sh deploy` reads it back over ssh. A deploy that does not report the tag
+  it shipped is recorded as a failure.
+- **Rollback re-uploads.** `releases/` keeps every artifact (it is gitignored), so going back is
+  not a rebuild of an old checkout — it is shipping the file you already verified.
+
+The manual `tar` flow still works; the installer prints `no VERSION file — this is a
+working-tree build, not a release` and `release.sh status` will say the same.
+
 ## What the installer does, in order
 
 | Step | Action |

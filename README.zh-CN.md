@@ -107,6 +107,10 @@ cpctl session finish --status completed --summary "12 tests pass" --exit-code 0
 改回去——这是故意的，否则最终结论会取决于网络到达顺序。`awaiting_user` 是事件而不是状态，
 所以下一次任意事件都能把它清掉。
 
+同理，`turn_completed` 也是事件：它表示 agent 完成了一轮回复，但进程还开着（编辑器里的
+Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍然是 `running`——进程确实还在——
+等你下一条 prompt 上报 `progress` 时自动清掉。
+
 要接入一个真实在跑的 agent，而不是手写上报：
 
 - **Claude Code**：用 `sdk/csd-agent`，一条命令安装 tunnel、存活探针和 hooks，见

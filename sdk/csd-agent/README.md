@@ -248,10 +248,10 @@ delivered, the entry is kept and retried rather than forgotten.
 | Event | Action |
 |---|---|
 | `SessionStart` | create the session, or reuse it on `--resume`; close any dead session in the same directory |
-| `UserPromptSubmit` | replace the placeholder title with the user's first prompt |
+| `UserPromptSubmit` | replace the placeholder title, and report `Turn N: <prompt>` as a `progress` event |
 | `Notification` | report an `awaiting_user` event — Claude Code saying it wants a human |
+| `Stop` | report a `turn_completed` event; **never a status** |
 | `SessionEnd` | `finish --status completed` |
-| `Stop` | **nothing** |
 
 ### `Notification` is an event, not a status
 
@@ -265,7 +265,7 @@ Claude Code re-fires this while it stays blocked. That is harmless: `cpctl` deri
 `event_key` from the session, type and message, so a repeated notification is ignored rather
 than stacking up rows.
 
-### `Stop` is not a session end
+### `Stop` is a turn boundary, not a session end
 
 `Stop` fires every time Claude Code finishes *a reply* — the first one seconds after the
 session opens. Wiring it to `session finish` would make every session terminal immediately,
@@ -273,12 +273,28 @@ and it would be permanent: terminal states are sticky and first-write-wins (§3)
 later event would be silently discarded and the dashboard would show a wall of "finished"
 sessions that are all still running.
 
+Doing nothing is wrong in the other direction, and an editor makes it obvious: a VS Code
+window keeps one Claude Code process alive for days, so `SessionEnd` does not fire between
+prompts and the page showed `running` for hours after the work had stopped. `Stop` therefore
+reports a **`turn_completed` event**, which moves no status. The dashboard renders it as
+`idle` — a display state read off the newest event, cleared by the next `progress` — while the
+session stays `running`, because the process really is still open (design.md §36).
+
 The other events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStop`,
-`PreCompact`) are not wired either, and that one is a choice rather than a rule: they fire
+`PreCompact`) are not wired, and that one is a choice rather than a rule: they fire
 per tool call, and `PostToolUse` carries `tool_input` — for `Bash` that is your command line,
 for `Edit` it is your code. Sending that to a cloud database is a privacy decision, not a
 configuration detail. Turn them on deliberately if you want per-tool granularity; the
 mapping is one line each in `csd_agent/hooks.py`.
+
+### A prompt is progress
+
+`UserPromptSubmit` reports `Turn N: <first line of the prompt>` as a `progress` event, beside
+updating the title. With the per-tool hooks off, that is the only "working on X" signal the
+connector has between `SessionStart` and `Stop`, and without it an interactive session's
+timeline held exactly one line. The turn number comes from `tracked.json` and is part of the
+message because `cpctl` derives its idempotency key from the message — two turns whose prompts
+read the same ("continue") must still be two rows.
 
 ## Requirements
 

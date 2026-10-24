@@ -64,6 +64,57 @@ def test_a_reported_session_end_drops_the_entry(monkeypatch) -> None:
     assert dropped == ["cc-1"]
 
 
+def test_stop_reports_a_turn_boundary_and_never_a_status(monkeypatch) -> None:
+    """`Stop` is a per-reply signal, so it must not close the session (§15, §36).
+
+    The event is what lets the page stop saying "running" while an editor keeps the process
+    open between prompts. Sending `session finish` here would make the first reply terminal
+    and, because terminal states are sticky, every later event would be discarded.
+    """
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: entry() if cc_id == "cc-1" else None)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="ok\n"))[1],
+    )
+
+    hooks.on_stop({"session_id": "cc-1", "stop_hook_active": False})
+
+    assert len(calls) == 1
+    kind, session_flag, session_id = calls[0][:3]
+    assert (kind, session_flag, session_id) == ("event", "--session", "s_abc")
+    assert "--type" in calls[0]
+    assert calls[0][calls[0].index("--type") + 1] == "turn_completed"
+    assert "finish" not in calls[0]
+
+
+def test_a_prompt_reports_progress_and_bumps_the_turn(monkeypatch) -> None:
+    """The prompt is the only "working on X" report between the two ends of a turn.
+
+    With `PostToolUse` deliberately unwired, this is what gives the timeline a line per turn.
+    The turn number is in the message because `cpctl` derives its idempotency key from it —
+    two identical prompts ("continue") would otherwise be deduplicated into one row.
+    """
+    calls: list[tuple[str, ...]] = []
+    stored: list[tracked.Tracked] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: entry() if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="ok\n"))[1],
+    )
+
+    hooks.on_user_prompt({"session_id": "cc-1", "prompt": "fix the tests\nand the docs"})
+
+    assert [c[:2] for c in calls] == [("session", "update"), ("event", "--session")]
+    event_call = calls[1]
+    assert event_call[event_call.index("--type") + 1] == "progress"
+    assert "Turn 1: fix the tests" in event_call
+    assert stored and stored[0].turn == 1
+
+
 def test_concurrent_writers_leave_a_readable_tracked_file(tmp_path: Path, monkeypatch) -> None:
     """Closing one VS Code window fires a `SessionEnd` per open session at the same moment.
 

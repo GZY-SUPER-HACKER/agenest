@@ -19,6 +19,10 @@ htmlcov/
 # Local state written by the CLI (`.cpctl/<slug>.id` holds a session id per project).
 .cpctl/
 
+# Release artifacts cut by release.sh — the tag is the source, the tarball is a build
+# product that must be reproducible from it, never a thing to commit.
+releases/
+
 # Local dev state from dev.sh: the SQLite database, the generated dev token, and the
 # pid/log files. Both locations matter: `backend/data/` is where dev.sh writes, and
 # `/data/` is the backend's own default (`CSD_DB_PATH` unset), so a plain `python -m

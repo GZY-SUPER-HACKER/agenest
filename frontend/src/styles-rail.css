@@ -582,6 +582,12 @@
   background: var(--warn);
 }
 
+/* Between replies: reported (solid dot), but not working, so not the running green. After the
+   `[data-status="running"]` rule so it wins. */
+.row[data-idle="true"] .row__dot {
+  background: var(--quiet);
+}
+
 .row__body {
   flex: 1 1 auto;
   min-width: 0;
