@@ -208,6 +208,13 @@ of your problems.
   hide it. Unlike `awaiting_user` it is **not** gated on `running`; a completed run that failed
   the task still belongs under needs-attention. Never infer it from an exit code or the final
   prose (§40).
+- **A session leaves needs-attention when a person dismisses it, and a dismissal is a watermark.**
+  `dismissed_event_id` is compared with the newest *display* event on every response, so a verdict
+  that lands after the acknowledgement asks again — and a heartbeat does not. It changes no
+  status, writes no event, and moves neither `updated_at` nor `last_activity_at` (acknowledging
+  is not activity). `sessionBucket` keeps the overview's tiles a partition: a dismissed ended
+  session lands in Finished rather than vanishing. There is no un-dismiss route — a newer report
+  is the way back — and the route is behind the access token exactly like close (§42).
 - **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` but
   **not** `updated_at`, and is excluded from timelines and from `last_event`. Otherwise 40
   pings during a test run bury the last thing the user actually did.

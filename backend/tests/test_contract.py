@@ -199,6 +199,131 @@ def test_close_cannot_reopen_a_finished_session(settings, db, broker) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# dismissing a session from needs-attention (design.md §42)
+# --------------------------------------------------------------------------- #
+def test_dismiss_is_refused_when_no_access_token_is_configured(settings, db, broker) -> None:
+    """The same asymmetry as close: an unconfigured access token disables acting, not reads.
+
+    The ingest token is refused as well — a machine permitted to report work must not be able
+    to hide a row from the board.
+    """
+    from app.main import create_app
+
+    with TestClient(create_app(settings=settings, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=INGEST).status_code == 403
+
+
+def test_dismiss_needs_the_access_token_and_the_ingest_token_cannot(
+    settings, db, broker
+) -> None:
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        assert c.post(f"/api/sessions/{sid}/dismiss").status_code == 401
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=INGEST).status_code == 401
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=READ).status_code == 200
+
+
+def test_dismiss_takes_an_ended_session_out_of_attention_without_moving_it(
+    settings, db, broker
+) -> None:
+    """The exit needs-attention did not have: an `interrupted` row had nothing to click.
+
+    Dismissing records that a person *read* it. It must not rewrite the outcome, and it must
+    not move the activity clock either — acknowledging is not work, the same rule heartbeats
+    follow. `updated_at` orders the rail, so touching it would teleport an old row to the top.
+    """
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        assert report(c, sid, "progress", "halfway").status_code == 202
+        before = c.patch(
+            f"/api/sessions/{sid}", json={"status": "interrupted"}, headers=INGEST
+        ).json()
+        assert before["dismissed"] is False
+
+        body = c.post(f"/api/sessions/{sid}/dismiss", headers=READ).json()
+        assert body["dismissed"] is True
+        assert body["status"] == "interrupted"
+        assert body["updated_at"] == before["updated_at"]
+        assert body["last_activity_at"] == before["last_activity_at"]
+
+        listed = c.get("/api/sessions", headers=READ).json()["sessions"]
+        assert [s["dismissed"] for s in listed if s["id"] == sid] == [True]
+
+        # One-way by design: there is no un-dismiss route. A newer report is the way back, and
+        # `test_a_newer_report_puts_a_dismissed_session_back` is that half.
+        assert c.delete(f"/api/sessions/{sid}/dismiss", headers=READ).status_code == 405
+
+
+def test_a_newer_report_puts_a_dismissed_session_back(settings, db, broker) -> None:
+    """The dismissal is a watermark, not a switch.
+
+    A verifier reports `task_failed` *after* the run has closed (design.md §40). An
+    acknowledgement recorded a minute earlier must not swallow it — that is precisely the
+    report the reader needs.
+    """
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        assert report(c, sid, "session_completed", "run ended").status_code == 202
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=READ).json()["dismissed"] is True
+
+        assert report(c, sid, "task_failed", "3 tests failed").status_code == 202
+        body = c.get(f"/api/sessions/{sid}", headers=READ).json()
+        assert body["dismissed"] is False
+        assert body["last_verdict"]["event_type"] == "task_failed"
+
+
+def test_a_heartbeat_does_not_reopen_a_dismissed_session(settings, db, broker) -> None:
+    """A ping is a liveness fact, not a new report about the work.
+
+    If silence-renewal could clear the acknowledgement, a process that is merely still running
+    would put its own row back on the board every few minutes.
+    """
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        assert report(c, sid, "session_failed", "agent crashed").status_code == 202
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=READ).json()["dismissed"] is True
+
+        assert report(c, sid, "heartbeat", "still here").status_code == 202
+        body = c.get(f"/api/sessions/{sid}", headers=READ).json()
+        assert body["dismissed"] is True
+        assert body["status"] == "failed"
+
+        # Repeating the action is idempotent in the sense that matters: still dismissed.
+        assert c.post(f"/api/sessions/{sid}/dismiss", headers=READ).json()["dismissed"] is True
+
+
+def test_dismiss_of_an_unknown_session_is_404(settings, db, broker) -> None:
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        assert c.post("/api/sessions/s_nope/dismiss", headers=READ).status_code == 404
+
+
+# --------------------------------------------------------------------------- #
 # validation (spec 6.4, 9)
 # --------------------------------------------------------------------------- #
 def test_unknown_field_is_rejected(client: TestClient) -> None:

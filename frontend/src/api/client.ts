@@ -211,6 +211,17 @@ export async function closeSession(id: string): Promise<Session> {
 }
 
 /**
+ * Take a session out of needs-attention (design.md §42).
+ *
+ * Same kind of record edit as `closeSession`, and the same credential. The server stores a
+ * watermark rather than a flag, so a report that lands after this — typically a verdict from
+ * a verifier that ran after the agent exited — puts the session back on the board by itself.
+ */
+export async function dismissSession(id: string): Promise<Session> {
+  return apiAction<Session>(`/api/sessions/${id}/dismiss`, "POST");
+}
+
+/**
  * Authorize the personal agent to ssh into a registered host (docs/design.md §24).
  *
  * The server mints a key and answers with the *public* half; the host's own connector installs

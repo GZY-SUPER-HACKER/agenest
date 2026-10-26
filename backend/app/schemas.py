@@ -316,6 +316,11 @@ class SessionOut(ApiModel):
     #: read the verdict off `last_event`. This field keeps the fact; whether it still
     #: describes the current work is a display decision (docs/design.md §40).
     last_verdict: "EventOut | None" = None
+    #: A person has read this session and needs nothing further from it (docs/design.md §42).
+    #: A **display projection**, like `possibly_stale`, not a stored flag: the server compares
+    #: the recorded dismissal watermark with the newest display event, so a report that lands
+    #: after the acknowledgement asks for attention again. Never a status.
+    dismissed: bool = False
 
 
 class SessionDetailOut(SessionOut):

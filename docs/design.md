@@ -2444,3 +2444,62 @@ another tool's private database a source of truth for our hooks, and every chang
 Code plugin.** It is the structural answer — plugin hooks are loaded from the plugin directory,
 which settings-rewriting tools do not touch — but it changes how the connector is packaged and
 installed, and the timer covers the same failure with a fraction of the surface.
+
+
+## 42. A session leaves needs-attention when a person says so
+
+Needs attention had no exit. It is built from four reports — `awaiting_user`, a `task_failed`
+verdict, `failed`, and `interrupted` — and for the last two there is nothing the reader can
+*do*. "Close session" is offered only while a session is running, and the ordinary source of
+`interrupted` is the connector's liveness check closing a process that vanished: on 2026-10-24
+a Claude Code session whose window had been closed was recorded as `interrupted` with "Claude
+Code exited without a reported end; closed by connector check" and sat at the top of the board
+afterwards, with no action that would ever take it down. A list of decisions in which some
+decisions cannot be recorded can only grow.
+
+The missing fact is not about the work. It is about the reader: *I have seen this, and there is
+nothing left for me to do.* That is a human decision, and the dashboard records human decisions
+in the record — `close` already does — so it is recorded here too: `dismissed_at` and
+`dismissed_event_id` on the session row, written by `POST /api/sessions/{id}/dismiss`. It is
+behind the access token, like close: the ingest token reports what happened, a person says what
+they have read (§22).
+
+**It is a watermark, not a flag.** `dismissed_event_id` is the newest event at the moment of
+dismissal, and the `dismissed` a client sees is computed per response by comparing it with the
+newest *display* event. A report newer than the acknowledgement asks again. That is the ordinary
+order for a verdict: a verifier reports `task_failed` after the run has closed (§40), and an
+acknowledgement recorded a minute earlier must not swallow the one report the reader needs. It
+also means a session dismissed while still running reopens on its next progress line with no
+bookkeeping, and that a heartbeat — liveness, not work — does not.
+
+**It moves no status, writes no event, and touches no activity time.** Dismissal is not a fact
+about the work, so it cannot be a sixth status: the row is still `interrupted` and Finished can
+say so. No `status_changed`-style row is written, because the timeline is the agent's and the
+verifier's account of the work, and "a person read this" is not one of its events. `updated_at`
+and `last_activity_at` are left alone: acknowledging is not activity, the rule heartbeats
+already follow, and bumping `updated_at` would teleport an old row to the top of a list ordered
+by it.
+
+**Where it lands on the board.** Dismissal removes the row from *needs attention*; it does not
+remove the row. `sessionBucket` (`frontend/src/lib/format.ts`) gives every session exactly one
+bucket, so the tile row still partitions the board: an ended session joins *Finished* (the
+status pill still says `interrupted` or `failed`), and one that is still running joins *Running*,
+because that is still true of it. The detail page offers the action for anything currently
+asking, and once dismissed says so instead — there is no second button and no confirmation
+dialog, because nothing is deleted and nothing leaves the page.
+
+Rejected: **an undo.** Dismissal needs no reverse control of its own: the row is still on the
+board with its original status, and any report newer than the acknowledgement already puts it
+back under needs-attention — the self-clearing half is the undo, and it fires on exactly the
+reports that matter. A second route plus a "put it back" state would be surface for a case the
+board can already express. Rejected: **expiring attention by age.** "Old enough to ignore" is an
+inference, and deciding on the reader's behalf that a failure stopped mattering is exactly what
+§2 forbids. Rejected: **keeping `interrupted` out of needs-attention.** A killed run is something
+a person may well want to look at; the fix is an exit, not a smaller list. Rejected: **deleting
+the row.** The record is the product; a dismissed session is history, not garbage. Rejected:
+**dismissing automatically when a human closes a session.** The two answer different questions —
+closing records *how it ended*, dismissing records *that it was read* — and the rows that hurt
+most are written by the connector's liveness check, with no human present to have read anything.
+Rejected: **persisting `dismissed` as a boolean.** Then a dismissal would silently outlive every
+later report, including the verdict that arrives after close; the watermark is what makes the
+action expire at exactly the right moment.

@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary           TEXT,
     exit_code         INTEGER,
     heartbeat_count   INTEGER NOT NULL DEFAULT 0,
+    -- A person has read this row and there is nothing left to do about it (docs/design.md §42).
+    -- `dismissed_event_id` is the newest event at the moment of dismissal; the `dismissed`
+    -- flag a client sees is computed by comparing it with the newest display event, so a
+    -- later report asks for attention again. `dismissed_at` is the record of the action.
+    dismissed_at      TEXT,
+    dismissed_event_id INTEGER,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -306,6 +312,12 @@ class Database:
         }
         if "host" not in columns:
             self._connection().execute("ALTER TABLE sessions ADD COLUMN host TEXT")
+
+        # Dismissal from needs-attention (§42). Nullable on both halves: an older database has
+        # rows nobody has read, which is exactly "not dismissed".
+        self._add_missing(
+            "sessions", {"dismissed_at": "TEXT", "dismissed_event_id": "INTEGER"}
+        )
 
         # What a connector declares about being driven (§24). Defaulted rather than nullable,
         # so a row written by an older connector reads as "did not ask" instead of "unknown".

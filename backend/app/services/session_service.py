@@ -73,12 +73,13 @@ def _row_to_session(row, *, possibly_stale: bool = False, last_event=None) -> Se
 
 
 def attach_last_events(db: Database, sessions: list[SessionOut]) -> None:
-    """Populate `last_event` for a page of sessions in **one** query.
+    """Populate the per-session projections the list and detail views render.
 
-    A correlated subquery per session would be simpler to write and would mean N queries for
-    an N-row page — which is exactly the shape a phone's sidebar produces, re-fetched on every
-    SSE frame. One grouped query over the ids we already have is the difference between a
-    dashboard that feels instant and one that doesn't.
+    That is `last_event`, `last_verdict`, and `dismissed`. A correlated subquery per session
+    would be simpler to write and would mean N queries for an N-row page — which is exactly
+    the shape a phone's sidebar produces, re-fetched on every SSE frame. One grouped query
+    over the ids we already have is the difference between a dashboard that feels instant and
+    one that doesn't.
 
     `heartbeat` and `status_changed` are excluded for the reason documented on
     `get_last_display_event`: a ping is not activity, and a status the dashboard wrote itself
@@ -123,9 +124,25 @@ def attach_last_events(db: Database, sessions: list[SessionOut]) -> None:
     )
     verdict_by_session = {row["session_id"]: _row_to_event(row) for row in verdict_rows}
 
+    # Dismissal is a watermark on the row, not a flag: "everything up to here has been read".
+    # Comparing it with the newest *display* event is what lets a verdict reported after the
+    # acknowledgement (docs/design.md §40) put the session back under needs-attention (§42).
+    dismissal_rows = db.query(
+        f"""
+        SELECT id, dismissed_event_id FROM sessions
+         WHERE id IN ({placeholders}) AND dismissed_event_id IS NOT NULL
+        """,
+        tuple(ids),
+    )
+    mark_by_session = {row["id"]: row["dismissed_event_id"] for row in dismissal_rows}
+
     for session in sessions:
         session.last_event = by_session.get(session.id)
         session.last_verdict = verdict_by_session.get(session.id)
+        mark = mark_by_session.get(session.id)
+        session.dismissed = mark is not None and (
+            session.last_event is None or session.last_event.id <= mark
+        )
 
 
 def _row_to_detail(row, *, possibly_stale: bool = False) -> SessionDetailOut:
@@ -548,6 +565,51 @@ def patch_session(db: Database, session_id: str, data: SessionPatch):
     return _row_to_session(row), True
 
 
+def dismiss_session(db: Database, session_id: str) -> tuple[SessionOut | None, bool]:
+    """Record that a person has read a session and needs nothing further from it.
+
+    Returns `(session, changed)`, the same shape as `patch_session`: an unchanged request is
+    not an error, and a repeated dismissal at the same watermark is a no-op rather than a new
+    timestamp. There is no way to take it back — see docs/design.md §42 for why the row being
+    on the board is the only undo the action needs.
+
+    Deliberately narrow: it writes the two dismissal columns and nothing else. It moves no
+    status (this is not a fact about the work), writes no event (the timeline belongs to the
+    agent and the verifier, and "a person read this" is not something either reported), and
+    leaves `updated_at` / `last_activity_at` alone — acknowledging is not activity, the same
+    rule heartbeats follow, and bumping `updated_at` would teleport an old row to the top of a
+    list ordered by it.
+    """
+    if get_session_row(db, session_id) is None:
+        return None, False
+
+    now = utcnow()
+
+    with db.write():
+        # Re-read under the write lock, for the reason `patch_session` documents: the row this
+        # decision depends on may be changing on another thread.
+        row = get_session_row(db, session_id)
+        if row is None:
+            return None, False
+
+        newest = db.query_one(
+            "SELECT MAX(id) AS n FROM session_events WHERE session_id = ?",
+            (session_id,),
+        )
+        mark = newest["n"] if newest is not None else None
+        if row["dismissed_at"] is not None and row["dismissed_event_id"] == mark:
+            return _row_to_session(row), False
+
+        db.execute(
+            "UPDATE sessions SET dismissed_at = ?, dismissed_event_id = ? WHERE id = ?",
+            (now, mark, session_id),
+        )
+
+    row = get_session_row(db, session_id)
+    assert row is not None
+    return _row_to_session(row), True
+
+
 def _insert_event(
     db: Database,
     *,
@@ -592,6 +654,7 @@ __all__ = [
     "attach_last_events",
     "count_events",
     "create_session",
+    "dismiss_session",
     "get_events_after",
     "get_last_display_event",
     "get_session",
