@@ -111,14 +111,23 @@ cpctl session finish --status completed --summary "12 tests pass" --exit-code 0
 Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍然是 `running`——进程确实还在——
 等你下一条 prompt 上报 `progress` 时自动清掉。
 
+还有一种 `task_completed` / `task_failed` 也是事件，而且必须由知道任务结果的一方上报：agent
+正常退出、测试却是红的，这种"跑完了但活没干成"没有任何 runtime 会告诉你。agent 可以用
+`csd-agent skill install` 装好的 `bash ~/.csd/bin/csd-cpctl task done|failed -m "..."` 自己报
+（`bash` 是显式的：launcher 是 shell 脚本，Windows 下 agent 的 shell 可能是 PowerShell）；
+也可以用 `run-agent.sh --verdict "pytest -q"` 让校验命令的退出码来判定，或者由编排方直接上报。
+它可以落在 session 已经 `completed` 之后，页面照样把这条放进 needs attention；状态列仍然诚实地
+写着进程是怎么结束的。为了让 agent 报完 verdict 之后紧跟的 `turn_completed` 不把它盖掉，服务端
+单独投影了 `last_verdict`。见 [docs/design.md](docs/design.md) §40。
+
 要接入一个真实在跑的 agent，而不是手写上报：
 
 - **Claude Code**：用 `sdk/csd-agent`，一条命令安装 tunnel、存活探针和 hooks，见
   [sdk/csd-agent/README.md](sdk/csd-agent/README.md)。
 - **任意命令**：用 [run-agent.sh](run-agent.sh) 包一层，它会在 agent 启动前开 session，
   退出后用真实 exit code 关闭 session，不改变 agent 本身的行为。
-- **nanobot**：[sdk/csd_nanobot.py](sdk/csd_nanobot.py) 提供 `DashboardHook`，挂在它的
-  lifecycle 上，不需要改上游。
+- **nanobot**：只作为 Agent tab 的 personal agent，**不作为 coding session 上报**——它的
+  角色是"你对话的那个 agent"，不是被观测的工作，所以没有对应的 hook。
 
 ## 装到手机上
 

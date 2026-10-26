@@ -22,7 +22,11 @@
  * The same `pi` binary is also what the dashboard's Agent tab spawns (`native`). Those runs are
  * one conversation with the operator, not work on the dashboard's Sessions tab, and reporting
  * them would show the channel talking to itself. The backend marks every child it owns with
- * `CSD_AGENT=1`, and this extension returns without registering anything when it sees it.
+ * `CSD_AGENT=1` **and** its own pid in `CSD_AGENT_PARENT`; this extension returns without
+ * registering anything only when both the marker and the parent match. A `pi` run that the
+ * personal agent itself spawns (a coding run) inherits the marker but has a different ppid, so
+ * it reports — which is the point: the channel talking to itself is not the same thing as the
+ * channel driving a coding agent (docs/design.md §31).
  *
  * ## What is not reported
  *
@@ -33,9 +37,9 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, hostname as osHostname } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** How `csd-agent` recognises its own file. Never delete a file that does not carry it. */
 export const MARKER = 'csd-pi-reporter'
@@ -113,9 +117,27 @@ export function firstLine(text, limit = 68) {
   return ''
 }
 
+/**
+ * The assistant's own sentence from a Pi `AgentMessage`.
+ *
+ * Pi's content array interleaves text, thinking and tool calls. Only text blocks are prose
+ * addressed to the reader; the others are machinery. A message with no text blocks returns
+ * `''`, and the caller must not invent a sentence from the tool names (design.md §2, §37).
+ */
+export function assistantText(message) {
+  if (!message || message.role !== 'assistant') return ''
+  const content = message.content
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n')
+    .trim()
+}
+
 /** Last path segment, for both separators: Pi runs on either kind of host. */
-export function projectName(cwd) {
-  const parts = String(cwd || '').split(/[\\/]+/).filter(Boolean)
+export function projectName(cwd) {  const parts = String(cwd || '').split(/[\\/]+/).filter(Boolean)
   return cap(parts[parts.length - 1] || 'pi', MAX_PROJECT)
 }
 
@@ -216,10 +238,17 @@ export function resolveConfig(deps = {}) {
     agentType: (pick(config.agentType, env.CSD_AGENT_TYPE) || DEFAULT_AGENT_TYPE).slice(0, 64),
     host: host.slice(0, 64),
     reportHost: config.reportHost !== false,
-    // Two switches say "do not report": one marks a Pi child the dashboard owns, the other is
+    // Two switches say "do not report": one marks the Pi child the dashboard owns, the other is
     // the operator's own opt-out. Both are silent — a personal agent must not warn on every
     // launch about a feature it was never meant to have.
-    disabled: env.CSD_AGENT === '1' || env.CSD_PI_REPORTER === '0',
+    //
+    // The ownership marker is scoped to the **direct child**. `CSD_AGENT_PARENT` carries the
+    // backend's pid; a `pi` run the personal agent spawns inherits the marker but has a
+    // different parent, so it is a coding run and must report (§31).
+    disabled:
+      (env.CSD_AGENT === '1' &&
+        (!Number(env.CSD_AGENT_PARENT || 0) || process.ppid === Number(env.CSD_AGENT_PARENT))) ||
+      env.CSD_PI_REPORTER === '0',
     // Minutes, and 0 disables the timer. The run heartbeat exists only to keep a long model
     // step from being rendered as "maybe offline" (docs/design.md §8); it renews liveness,
     // never activity.
@@ -452,6 +481,66 @@ export function install(pi, deps = {}) {
     return next
   }
 
+  /**
+   * Publish where this run's session lives, for `cpctl task done|failed` to find.
+   *
+   * The agent's shell cannot see this extension's process or environment, and Pi gives it no
+   * session id to pass. A per-process file under `~/.csd/state/sessions.d/` is the handoff:
+   * `cpctl` reads the newest entry matching the working directory. Per-process means two Pi
+   * processes never write the same file. Removed when the run closes; a crash leaves a stale
+   * entry, which only matters if no newer run exists in that directory.
+   */
+  function sessionMapFile() {
+    const home = process.env.CSD_AGENT_HOME || join(homedir(), '.csd')
+    return join(home, 'state', 'sessions.d', `pi-${process.pid}.json`)
+  }
+
+  function writeSessionMap(run) {
+    if (!run?.csdId || !run.cwd) return
+    try {
+      const file = sessionMapFile()
+      mkdirSync(dirname(file), { recursive: true })
+      const payload = {
+        writer: 'pi',
+        by_cwd: {
+          [run.cwd]: [{
+            session_id: run.csdId,
+            harness_id: run.id,
+            pid: process.pid,
+            started_at: run.startedAt,
+          }],
+        },
+      }
+      const tmp = `${file}.tmp`
+      writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf8')
+      renameSync(tmp, file)
+    } catch {
+      // Convenience for the agent's CLI, never a reason to disturb the run.
+    }
+  }
+
+  function clearSessionMap(run = null) {
+    const file = sessionMapFile()
+    try {
+      // A new run may already have overwritten the file (session_start closes the leftover
+      // and opens the next one in the same tick). Removing it then would delete the *new*
+      // run's entry, so only remove what still names this run.
+      if (run) {
+        // A run that never got a session never wrote an entry; removing the file would only
+        // touch somebody else's.
+        if (!run.csdId) return
+        const data = JSON.parse(readFileSync(file, 'utf8'))
+        const ids = Object.values(data?.by_cwd ?? {})
+          .flat()
+          .map((entry) => entry?.session_id)
+        if (!ids.includes(run.csdId)) return
+      }
+      rmSync(file, { force: true })
+    } catch {
+      // Nothing to do: a stale file is ignored in favour of a newer run in the same directory.
+    }
+  }
+
   function openRun(event, ctx) {
     const cwd = typeof ctx?.cwd === 'string' && ctx.cwd ? ctx.cwd : lastCwd
     const run = {
@@ -460,10 +549,17 @@ export function install(pi, deps = {}) {
       project: projectName(cwd),
       title: cap(firstLine(event?.prompt, 68) || `Pi · ${projectName(cwd)}`, MAX_TITLE),
       csdId: null,
+      // Seconds, not milliseconds: the map is shared with the Python connectors, which use
+      // epoch seconds, and `cpctl` compares the newest entry across all of them.
+      startedAt: now() / 1000,
       stopReason: null,
       errorMessage: null,
       heartbeat: null,
       closed: false,
+      // Once this run has reported a prose checkpoint, `turn N complete` lines stop: the
+      // checkpoint is the progress track, and a machine-voice line beside it is the same fact
+      // twice. A run with no prose keeps the step lines as its fallback (design.md §37).
+      checkpointed: false,
       chain: Promise.resolve(),
     }
     return run
@@ -488,6 +584,7 @@ export function install(pi, deps = {}) {
       const session = await client.createSession(body)
       run.csdId = session?.id ?? null
       if (!run.csdId) throw new Error('the dashboard returned no session id')
+      writeSessionMap(run)
       info(`pi-csd-reporter: run ${run.id} -> ${run.csdId}`)
       startHeartbeat(run)
       return true
@@ -520,10 +617,36 @@ export function install(pi, deps = {}) {
     }, config.runHeartbeatMinutes)
   }
 
-  async function reportTurn(run, turnIndex) {
+  async function reportTurn(run, turnIndex, message, toolResults) {
     if (run.closed) return
     if (!(await ensureSession(run))) return
     const number = Number.isFinite(Number(turnIndex)) ? Number(turnIndex) + 1 : null
+    const sentence = firstLine(assistantText(message), MAX_MESSAGE)
+    const followedByTools = Array.isArray(toolResults) && toolResults.length > 0
+
+    // A turn that was followed by tool results was commentary: the agent said what it was
+    // about to do and then did it. That is exactly the checkpoint the page is missing between
+    // the prompt and the answer. A turn with no tool results is the answer, and is left to
+    // `agent_settled` — reporting it here would show every answer twice.
+    if (followedByTools && sentence) {
+      await client.reportEvent(run.csdId, {
+        event_type: 'checkpoint',
+        message: cap(sentence, MAX_MESSAGE),
+        event_key: keyOf('pi', run.id, 'turn', number ?? 'last', 'checkpoint'),
+        occurred_at: new Date(now()).toISOString(),
+        payload: number
+          ? { source: 'prose', run: run.id, turn: number }
+          : { source: 'prose', run: run.id },
+      })
+      run.checkpointed = true
+      return
+    }
+
+    // A run that has ever produced a checkpoint does not need `turn N complete` lines: the
+    // checkpoint is the progress track. A run with no prose (tool-only steps) keeps them as
+    // its fallback, which is why this is per-run rather than global.
+    if (run.checkpointed) return
+
     await client.reportEvent(run.csdId, {
       // `turn_end` is progress, not a boundary: a prompt that calls tools ends several turns,
       // and the run is only over when Pi settles.
@@ -551,6 +674,7 @@ export function install(pi, deps = {}) {
     if (run.closed) return
     run.closed = true
     if (current === run) current = null
+    clearSessionMap(run)
     if (!run.csdId) {
       // A run that never got a session is dropped rather than retried here: the next prompt will
       // create a fresh one, and a late `PATCH` would be more confusing than the gap.
@@ -619,7 +743,7 @@ export function install(pi, deps = {}) {
     if (!run || run.closed) return
     recordStop(run, event?.message)
     const index = event?.turnIndex
-    enqueue(run, () => reportTurn(run, index))
+    enqueue(run, () => reportTurn(run, index, event?.message, event?.toolResults))
   })
 
   on('message_end', (event, _ctx) => {
@@ -669,6 +793,7 @@ export function install(pi, deps = {}) {
       await settleBriefly([enqueue(run, () => closeRun(run, 'interrupted', 'Pi exited before the run settled'))])
     }
     current = null
+    clearSessionMap(run)
   }
 
   return handle

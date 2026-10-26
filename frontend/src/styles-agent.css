@@ -138,6 +138,15 @@
 /* Top safe-area is handled by the app's own topbar, which sits above this pane. Reserving it
    again here pushed the header down and left a gap. */
 
+/* A gutter mirroring the gear, so the name is centred in the *header* rather than in whatever
+   the button left over — the flex:1 who was off-centre by half a gear button. It is drawn
+   rather than added to the markup so the gate headers get it too, and it is inert: no hit
+   target, nothing to tab to. */
+.tghead::before {
+  content: "";
+  flex: 0 0 38px;
+}
+
 /* The header's controls, in the app's neutral icon colour rather than the accent.
    `--accent` is one value shared by both themes, so a blue glyph here is the one thing on the
    page that does not answer to `data-theme` — and the accent is reserved for the single

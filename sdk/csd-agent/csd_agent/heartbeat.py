@@ -26,20 +26,36 @@ process being gone *is* the report.
 And a third, which is why this module does anything on a host with nothing running on it:
 reporting the host itself (`report_host`), so a machine that has connected shows up on the
 dashboard before its first session — and after its last one.
+
+And a fourth: putting this connector's hook entries back when something has rewritten Claude
+Code's `settings.json` (`install.repair_hooks`). That file has two writers with different
+semantics — this connector merges by marker, a config manager writes its whole template — and
+last writer wins. The timer is what makes the loss recoverable without the user noticing.
 """
 
 from __future__ import annotations
 
 import time
 
-from . import access, host, runtime, tracked
+from . import access, host, install, runtime, tracked
 
 
 def run(verbose: bool = False) -> int:
-    # Before anything else, and *before* the early return below. The host exists whether or
-    # not anything is running on it, and returning early was exactly why a freshly connected
-    # machine stayed invisible until its first Claude Code session started — leaving "did my
-    # agent host connect?" with no answer that did not involve SSH.
+    # First, and deliberately before any network work: a config manager can rewrite
+    # `~/.claude/settings.json` wholesale (cc-switch does, on every provider switch), which
+    # deletes every hook its template does not carry. The timer is the only thing already
+    # running on this host, so it is what notices — and a local repair must not depend on the
+    # dashboard being reachable. A missing or unreadable file is left alone (install reports
+    # those); this only puts back entries that were there and are now gone.
+    if install.repair_hooks(note=print):
+        print("hooks: repaired — settings.json had lost this connector's entries")
+    elif verbose:
+        print("hooks: present")
+
+    # The host exists whether or not anything is running on it, and returning early was
+    # exactly why a freshly connected machine stayed invisible until its first Claude Code
+    # session started — leaving "did my agent host connect?" with no answer that did not
+    # involve SSH.
     report_host(verbose=verbose)
 
     # The other half of the same errand (design.md §24): the dashboard may have a key waiting

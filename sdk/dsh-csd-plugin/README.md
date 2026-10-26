@@ -103,7 +103,9 @@ Optional config keys (all optional):
 | `turn/start` | creates a session: `agent_type: dsh`, project = cwd's last segment, workspace = cwd, host = this machine |
 | first human `user/message` in the turn | replaces the placeholder title with the prompt's first line |
 | `session/title` derived from this turn's prompt | replaces the title with DSH's generated one |
-| `step/end` | a `progress` event (`step N complete`) |
+| `step/end` | a `progress` event (`step N complete`), unless that step's assistant message was already a checkpoint |
+| `assistant/message` | a `checkpoint` when the same message also requested a tool (or DSH marked it `interrupted`); a text-only message is the answer and is left to `turn/end` |
+| `todo/write` | a `checkpoint` with `source: "plan"` carrying the whole todo list |
 | `approval/asked` | an `awaiting_user` event, so the session appears under *needs attention* |
 | `approval/decided` | a `progress` event that clears the attention state |
 | `user-questions/request` | an `awaiting_user` event; the request is delegated to DSH unchanged |

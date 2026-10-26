@@ -104,8 +104,28 @@ def attach_last_events(db: Database, sessions: list[SessionOut]) -> None:
     )
     by_session = {row["session_id"]: _row_to_event(row) for row in rows}
 
+    # The verdict gets its own projection rather than sharing `last_event`. The ordinary
+    # order is `task_failed` / `task_completed` and *then* the turn boundary (the agent calls
+    # the verdict at the end of its answer), so reading the verdict off `last_event` would
+    # hide it behind the `turn_completed` that follows. See docs/design.md §40.
+    verdict_rows = db.query(
+        f"""
+        SELECT * FROM (
+            SELECT session_id, MAX(id) AS newest
+              FROM session_events
+             WHERE session_id IN ({placeholders})
+               AND event_type IN ('task_failed', 'task_completed')
+             GROUP BY session_id
+        ) AS newest_per_session
+        JOIN session_events e ON e.id = newest_per_session.newest
+        """,
+        tuple(ids),
+    )
+    verdict_by_session = {row["session_id"]: _row_to_event(row) for row in verdict_rows}
+
     for session in sessions:
         session.last_event = by_session.get(session.id)
+        session.last_verdict = verdict_by_session.get(session.id)
 
 
 def _row_to_detail(row, *, possibly_stale: bool = False) -> SessionDetailOut:

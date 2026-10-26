@@ -104,6 +104,8 @@ question, and "nothing outside your home directory" is a better answer than a li
 ~/.ssh/authorized_keys               one line, only if you approve this host in the dashboard
 ~/.config/systemd/user/              csd-tunnel.service, csd-heartbeat.{service,timer}
 ~/.claude/settings.json              four hook entries merged in; a .bak-csd-agent is taken first
+~/.claude/skills/csd-task-verdict/   the skill that tells the agent when to report done/failed
+~/.csd/bin/csd-cpctl                 the launcher that skill calls (under ~/.csd/ above)
 ~/.dsh/profiles/*/package.json       one dependency + bundle entry, one per DSH profile
 ~/.pi/agent/extensions/csd-reporter.js  one copied file, the whole Pi install
 ```
@@ -117,17 +119,45 @@ No sudo, no pip, no conda environment, nothing outside `$HOME`. `csd-agent unins
 all of it except the `~/.csd` directory itself, which it tells you to remove by hand once you are
 sure.
 
-## The four verbs
+## The verbs
 
 | Command | What it is |
 |---|---|
-| `install` | one-time setup; vendors the code, writes the env file and the service entries (systemd units, or the Windows Startup + Task Scheduler pair), merges the Claude Code hooks, wires every DSH profile and the Pi extension, verifies |
-| `status` | what this host believes, which units are up, which DSH profiles carry the reporter, whether the Pi extension is in place, and whether the API actually answers |
+| `install` | one-time setup; vendors the code, writes the env file and the service entries (systemd units, or the Windows Startup + Task Scheduler pair), merges the Claude Code and Codex hooks, wires every DSH profile and the Pi extension, writes the task-verdict launcher/skill, verifies |
+| `status` | what this host believes, which units are up, whether Codex's hooks are in place, which DSH profiles carry the reporter, whether the Pi extension is in place, and whether the API actually answers |
 | `heartbeat` | the probe. Run by a timer every 5 minutes; also fine to run by hand |
 | `hook` | what Claude Code calls. Reads the payload on stdin; **always exits 0** |
+| `hook-codex` | what Codex calls. Same contract, different event vocabulary |
+| `skill install\|status\|uninstall` | the agent-side task verdict: `~/.csd/bin/csd-cpctl` plus the Claude Code skill that tells the model when to call it |
 
 `csd-agent dsh install\|status\|uninstall` is the same DSH wiring without the Claude Code half,
-for a host that runs DeepSeek Harness but not Claude Code.
+for a host that runs DeepSeek Harness but not Claude Code. `csd-agent pi ...` and
+`csd-agent codex ...` are the same idea for those two surfaces.
+
+## The task verdict
+
+Lifecycle reporting says how the *run* ended. It cannot say whether the *work* passed — an
+agent can exit 0 with the tests still red. `csd-agent skill install` writes two small pieces
+that let the agent itself say so:
+
+- `~/.csd/bin/csd-cpctl` — the reporting CLI with this install's `PYTHONPATH` and `~/.csd/env`
+  already applied, because the agent's shell has neither;
+- `~/.claude/skills/csd-task-verdict/SKILL.md` — when to call `task done` / `task failed`, and
+  when not to (questions, partial steps, every turn).
+
+```bash
+bash "$HOME/.csd/bin/csd-cpctl" task done -m "12 tests pass"
+bash "$HOME/.csd/bin/csd-cpctl" task failed -m "pytest: 3 failed"
+```
+
+`bash` is explicit because the launcher is a bash script: on Windows the agent's shell may be
+PowerShell, where a bare path to a `.sh`-style file produces no output and no exit code. In a
+POSIX shell `bash <path>` works just as well.
+
+The command resolves the session the connector opened in this directory, so the agent never
+has to know an id. It is optional: a wrapper can report a verifier's verdict instead
+(`run-agent.sh --verdict`), and a session with no verdict simply claims nothing. See
+[design.md](../../docs/design.md) §40.
 
 ## DeepSeek Harness
 
@@ -150,6 +180,38 @@ not an error: the Claude Code install is unaffected, and re-running the installe
 appears wires it then. The reporter itself is documented in
 [dsh-csd-plugin](../dsh-csd-plugin/README.md); its host row is `(label, dsh)`, separate from
 this connector's `(label, claude_code)`, because one connector speaks for one coding agent.
+
+## Codex
+
+Codex loads hooks from `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), and its
+payloads are Claude Code-compatible in shape: JSON on stdin, `hook_event_name` in the body, a
+short-lived command. `install` merges our matcher groups into that file; a host without Codex
+is skipped. `csd-agent codex install|status|uninstall` is the same module on its own.
+
+The file belongs to you. Install replaces only groups whose command carries our marker, and
+uninstall removes only those; anything else in the file is preserved verbatim. A malformed file
+is reported and left untouched.
+
+**The envelope is the same; the events are not.** Codex has no `MessageDisplay` and no
+`PostToolBatch`, and `postModelRequest` carries status and token usage but no text. So this
+reporter is **turn-level**: session start/end, the prompt, the reply boundary (`Stop`), user
+interrupts, and `awaiting_user` when Codex asks for approval. It emits **no checkpoints** —
+the only prose Codex exposes is `stop.last_assistant_message`, which is the answer, not
+progress (docs/design.md §38).
+
+`PermissionRequest` is observed, never decided. Codex broadcasts the request to every connected
+client and the first answer wins; a deny from this hook could beat the human in the TUI.
+Returning no decision is the safe behavior, and it is what the handler does.
+
+Codex marks new hooks untrusted until you approve them. An interactive session asks; a headless
+run can pass `--dangerously-bypass-hook-trust`. `csd-agent codex status` reports the file, not
+a trust decision this package cannot make for Codex.
+
+```bash
+python3 -m csd_agent codex install
+python3 -m csd_agent codex status
+python3 -m csd_agent codex uninstall
+```
 
 ## Pi
 
@@ -248,10 +310,26 @@ delivered, the entry is kept and retried rather than forgotten.
 | Event | Action |
 |---|---|
 | `SessionStart` | create the session, or reuse it on `--resume`; close any dead session in the same directory |
-| `UserPromptSubmit` | replace the placeholder title, and report `Turn N: <prompt>` as a `progress` event |
+| `UserPromptSubmit` | replace the placeholder title, and report `Turn N: <prompt>` as a `progress` event; a harness-injected message (e.g. `<task-notification>`) does neither (§39) |
+| `MessageDisplay` | accumulate the assistant text in `tracked.json`; report nothing yet |
+| `PostToolBatch` | report the accumulated sentence as a `checkpoint` |
 | `Notification` | report an `awaiting_user` event — Claude Code saying it wants a human |
 | `Stop` | report a `turn_completed` event; **never a status** |
 | `SessionEnd` | `finish --status completed` |
+
+### The heartbeat puts the entries back
+
+`settings.json` has two writers with different semantics: this installer merges by marker, and
+a config manager that stores a whole settings template (cc-switch does) writes it over the top
+on every provider switch. The second deletes every hook its template does not carry — on this
+project's own dev machine the notification-sound hook survived because it lives in that
+template, while all seven of ours vanished.
+
+The five-minute heartbeat checks for our marker and re-merges when any event is missing. It is
+deliberately conservative: a missing file or one that does not parse is left alone, because
+silently replacing a document we cannot read is worse than an unreported session. `csd-agent
+uninstall` deletes the timer before removing the entries, so the repair cannot fight a
+deliberate removal. Full argument in `docs/design.md` §41.
 
 ### `Notification` is an event, not a status
 
@@ -287,6 +365,27 @@ for `Edit` it is your code. Sending that to a cloud database is a privacy decisi
 configuration detail. Turn them on deliberately if you want per-tool granularity; the
 mapping is one line each in `csd_agent/hooks.py`.
 
+`PostToolBatch` is the exception: it fires **once per batch** of parallel tool calls, not
+once per tool, and the connector uses it only as a boundary — it never reads the tool calls.
+That is what makes a checkpoint possible without uploading the user's code.
+
+### A checkpoint is the agent's own sentence
+
+`MessageDisplay` carries the assistant text as it is displayed. The connector appends each
+batch to `tracked.json` and reports nothing at that point, because the message might still be
+the answer. `PostToolBatch` is the proof that it was commentary: a tool followed it. Only
+then is the first line sent as a `checkpoint` event, with `source: "prose"` and the agent's
+`message_id` as its idempotency key.
+
+A message with no tool batch after it is the answer, and `Stop` discards it. Without that
+half, every reply would appear twice — once as a checkpoint, once as the turn boundary.
+
+Both hooks run synchronously, and that is about ordering: `MessageDisplay` has to finish
+writing the pending text before the model can ask for a tool, and `PostToolBatch` has to read
+and clear it before the next message can replace it. An async flush could attribute the next
+message to the previous batch. The cost is one `cpctl` call between a batch and the next model
+call; the full argument is `docs/design.md` §37.
+
 ### A prompt is progress
 
 `UserPromptSubmit` reports `Turn N: <first line of the prompt>` as a `progress` event, beside
@@ -295,6 +394,14 @@ connector has between `SessionStart` and `Stop`, and without it an interactive s
 timeline held exactly one line. The turn number comes from `tracked.json` and is part of the
 message because `cpctl` derives its idempotency key from the message — two turns whose prompts
 read the same ("continue") must still be two rows.
+
+A message the harness injects is **not** a prompt. A finished background task arrives on
+`UserPromptSubmit` as a user-role message wrapped in `<task-notification>`, and a context
+reminder as `<system-reminder>`; naming the session after either is how rows called
+`<task-notification>` reached the deployed dashboard. Neither the title nor the `Turn N:` line
+is written for them. The turn counter still advances, because `Stop` keys its boundary on the
+number and reusing the previous one would deduplicate that boundary away. Full argument in
+`docs/design.md` §39.
 
 ## Requirements
 
@@ -309,6 +416,10 @@ read the same ("continue") must still be two rows.
   still common on agent hosts; the floor matches reality rather than making every deployment
   work around it.
 - `ssh` and, for the self-check, `curl`.
+- A Claude Code build that emits `MessageDisplay` and `PostToolBatch` if you want checkpoints.
+  On a build that does not, those two hooks never fire and the rest of the connector is
+  unaffected; the timeline then has turn-level progress only, which is the honest result
+  (docs/design.md §37).
 
 ## Files
 

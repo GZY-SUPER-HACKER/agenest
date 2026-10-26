@@ -16,10 +16,33 @@ stdin. This module turns those payloads into `cpctl` calls. It is the only piece
 |---|---|---|
 | `SessionStart` | create the session (or reuse it, on resume) | the only place a session can begin |
 | `UserPromptSubmit` | set the real title, and report a `progress` event | `SessionStart` fires before the user has typed anything, so its title is a placeholder; the prompt is also the only reliable "working on X" signal between the two ends of a turn |
+| `MessageDisplay` | accumulate the assistant text into `tracked.json` | the agent's own sentence is the only checkpoint that is not a summary we composed (design.md §37). It is not reported here: the message might still turn out to be the answer |
+| `PostToolBatch` | report the accumulated sentence as a `checkpoint` | a tool batch proves the preceding message was commentary. One hook per batch, not one per tool |
 | `Stop` | report a `turn_completed` event — **never a status** | Claude Code finished a reply, not the session. See below |
 | `SessionEnd` | `finish --status completed` | a clean exit; a crash does not fire this at all |
 | `Notification` | report an `awaiting_user` event | this is Claude Code saying it wants a human — the single most useful thing on a phone |
 | `PostToolUse`, `PreToolUse`, `SubagentStop`, `PreCompact` | nothing by default | volume, and the payload implications documented in the README |
+
+### A checkpoint is the agent's own sentence, not a summary we wrote
+
+`MessageDisplay` carries the assistant text as it is displayed, in batches. A message is
+stored as `pending_*` in `tracked.json` and reported only when a **later** `PostToolBatch`
+proves it was followed by tools. A message with no tool after it is the answer, and `Stop`
+throws it away.
+
+That rule is the whole feature. Without it every answer would appear as a progress line
+immediately before the turn boundary, which is the "commentary track" §23 rejected. The
+payload says `source: "prose"` so the page can never draw this as a plan or a status, and
+the event key is the agent's own `message_id` — a retried batch re-sends the same sentence
+without stacking a row (§7).
+
+Both hooks are installed synchronously, and that is deliberate. `MessageDisplay` must finish
+writing `tracked.json` before the model can ask for a tool. `PostToolBatch` must read and clear
+the pending sentence before the next `MessageDisplay` can replace it — an async flush can wake
+up after the next message has started and attribute that message to the previous batch. The
+cost is one `cpctl` call between a batch and the next model call; a dashboard that is down can
+delay the agent by the CLI's 3 s timeout, the same failure mode `Stop` and `UserPromptSubmit`
+already have.
 
 ### `Notification` reports an event, not a status
 
@@ -72,6 +95,21 @@ from . import config, runtime, tracked
 #: Long enough for a real task description, short enough not to wrap on a phone.
 MAX_TITLE = 68
 
+#: Matches the backend's `MAX_MESSAGE`. The sentence is capped here as well so a runaway
+#: message does not grow `tracked.json` between hook processes.
+MAX_CHECKPOINT = 500
+
+#: Tags that mark a message the harness injected into the conversation rather than one the user
+#: typed. They arrive on `UserPromptSubmit` too — a finished background task is delivered as a
+#: user-role message — so naming a session from every payload produced rows called
+#: `<task-notification>` on the deployed dashboard (docs/design.md §39).
+SYSTEM_MESSAGE_TAGS = (
+    "<task-notification>",
+    "<system-reminder>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+)
+
 
 def _log(message: str) -> None:
     """Append to the agent's log. Best-effort — a log write must not fail a hook."""
@@ -94,8 +132,22 @@ def _first_line(text: str, limit: int = MAX_TITLE) -> str:
     for raw in text.splitlines():
         line = " ".join(raw.split())
         if line:
-            return line[:limit].rstrip() + ("…" if len(line) > limit else "")
+            if len(line) <= limit:
+                return line
+            # The ellipsis is inside the limit, not added on top of it: this value is sent as
+            # a title or a checkpoint message, and one character over the API's cap is a 422
+            # that drops the whole report.
+            return line[: max(1, limit - 1)].rstrip() + "…"
     return ""
+
+
+def _is_system_message(text: str) -> bool:
+    """Is this the harness talking, rather than the person at the keyboard?
+
+    The test is the tag the harness writes, not the words in the payload: guessing from the
+    content would silently drop a prompt that merely mentions a notification.
+    """
+    return text.lstrip().startswith(SYSTEM_MESSAGE_TAGS)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,13 +238,19 @@ def on_user_prompt(payload: dict) -> None:
     entry = _entry_for(payload)
     if entry is None:
         return
-    title = _first_line(payload.get("prompt") or "")
-    if not title:
+    prompt = payload.get("prompt") or ""
+    if not prompt.strip():
         return
-    result = runtime.cpctl("session", "update", "--session", entry.csd_session_id,
-                           "--title", title)
-    _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
-         else f"UserPromptSubmit: cpctl failed: {result.detail}")
+    # A message the harness injected is not the user naming their work, so it never becomes the
+    # title. It still opens a model turn, and the counter has to move: `Stop` keys its boundary
+    # on the turn number, so reusing the previous one would deduplicate the boundary away and
+    # leave the page showing the state of a turn that has already ended.
+    title = "" if _is_system_message(prompt) else _first_line(prompt)
+    if title:
+        result = runtime.cpctl("session", "update", "--session", entry.csd_session_id,
+                               "--title", title)
+        _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
+             else f"UserPromptSubmit: cpctl failed: {result.detail}")
 
     # The prompt is the only thing that says "the agent is now working on X": `SessionStart`
     # fired hours ago, and `Stop` only says the turn is over. Without this the timeline of a
@@ -200,7 +258,12 @@ def on_user_prompt(payload: dict) -> None:
     # two identical prompts ("continue") from being deduplicated into one row by `cpctl`'s
     # message-derived key — and it is what lets `Stop` name which turn it is closing.
     entry.turn += 1
+    # A new prompt starts a new turn. Anything still pending belonged to the previous answer;
+    # carrying it forward would attribute an old sentence to the new work.
+    _clear_pending(entry)
     tracked.put(entry)
+    if not title:
+        return
     progress = runtime.cpctl("event", "--session", entry.csd_session_id,
                              "--type", "progress",
                              "-m", f"Turn {entry.turn}: {title}")
@@ -223,11 +286,86 @@ def on_stop(payload: dict) -> None:
     # (a resumed conversation before its first prompt) still deserves the boundary, and
     # naming it "turn 1" keeps the wording sane without inventing a new counter.
     turn = entry.turn or 1
+    # The message that preceded this boundary is the answer, not a checkpoint. If a tool batch
+    # never arrived to flush it, it dies here. This is the half that keeps the page from
+    # showing every answer twice — once as a checkpoint, once as the turn boundary.
+    _clear_pending(entry)
+    tracked.put(entry)
     result = runtime.cpctl("event", "--session", entry.csd_session_id,
                            "--type", "turn_completed",
                            "-m", f"Reply finished (turn {turn})")
     _log(f"Stop: turn {turn} finished" if result.ok
          else f"Stop: cpctl failed: {result.detail}")
+
+
+def on_message_display(payload: dict) -> None:
+    """Accumulate one assistant message; do not report it yet.
+
+    `MessageDisplay` fires while the text is being displayed, in batches. Reporting here would
+    put every answer on the timeline as a progress line — the "commentary track" §23 rejected.
+    The text waits in `tracked.json` until `PostToolBatch` proves a tool followed it.
+
+    The hook is installed synchronously on purpose: it must finish writing the pending text
+    before the model can ask for a tool, or the batch that should flush it finds nothing.
+    """
+    entry = _entry_for(payload)
+    if entry is None:
+        return
+    message_id = str(payload.get("message_id") or "")
+    if not message_id:
+        return
+    delta = payload.get("delta")
+    if not isinstance(delta, str):
+        delta = ""
+    if message_id != entry.pending_message_id:
+        # A new assistant message. The previous one either went out with a tool batch or was
+        # the answer; either way it is no longer a candidate for this turn.
+        entry.pending_text = ""
+        entry.pending_message_id = message_id
+        entry.pending_final = False
+    if delta:
+        entry.pending_text = (entry.pending_text + delta)[:MAX_CHECKPOINT]
+    if payload.get("final") is True:
+        entry.pending_final = True
+    tracked.put(entry)
+
+
+def on_post_tool_batch(payload: dict) -> None:
+    """A tool batch proves the message before it was commentary. Report it as a checkpoint.
+
+    This is the only place a checkpoint is sent. It runs synchronously: it must read and clear
+    the pending sentence before the next `MessageDisplay` can replace it, or an async flush
+    could attribute the next message to this batch. A message that no tool follows is the
+    answer, and `Stop` discards it instead.
+    """
+    entry = _entry_for(payload)
+    if entry is None or not entry.pending_final:
+        return
+    message = _first_line(entry.pending_text, MAX_CHECKPOINT)
+    if not message:
+        return
+    # The agent's own message id is the idempotency key: two flushes of the same sentence, or
+    # a retry after a timeout, insert one row (§7). The message-derived key would collapse two
+    # different checkpoints that happen to start with the same words.
+    event_key = f"cc-checkpoint:{entry.csd_session_id}:{entry.pending_message_id}"[:128]
+    result = runtime.cpctl(
+        "event", "--session", entry.csd_session_id,
+        "--type", "checkpoint",
+        "-m", message,
+        "--key", event_key,
+        "--payload", json.dumps({
+            "source": "prose",
+            "turn": entry.turn,
+            "message_id": entry.pending_message_id,
+        }, ensure_ascii=False),
+    )
+    if result.ok:
+        _clear_pending(entry)
+        tracked.put(entry)
+        _log(f"PostToolBatch: checkpoint -> {message!r}")
+    else:
+        # Keep it: the key makes the retry idempotent, and the next batch may deliver it.
+        _log(f"PostToolBatch: checkpoint failed: {result.detail}")
 
 
 def on_notification(payload: dict) -> None:
@@ -256,6 +394,9 @@ def on_session_end(payload: dict) -> None:
         return
     reason = payload.get("reason") or "exit"
     cwd = payload.get("cwd") or entry.cwd
+    # The process is ending; any half-observed message is not going to become a checkpoint.
+    _clear_pending(entry)
+    tracked.put(entry)
     result = runtime.cpctl("session", "finish", "--session", entry.csd_session_id,
                            "--status", "completed",
                            "--summary", f"Claude Code session ended ({reason}) in {Path(cwd).name}")
@@ -275,6 +416,17 @@ def on_session_end(payload: dict) -> None:
 def _entry_for(payload: dict) -> tracked.Tracked | None:
     cc_id = payload.get("session_id") or ""
     return tracked.get(cc_id) if cc_id else None
+
+
+def _clear_pending(entry: tracked.Tracked) -> None:
+    """Forget the assistant message waiting for a tool batch.
+
+    Called when the turn ends (it was the answer), when a new prompt starts (it belonged to
+    the previous work), and after a checkpoint is delivered (it is now a row).
+    """
+    entry.pending_text = ""
+    entry.pending_message_id = ""
+    entry.pending_final = False
 
 
 def _host_label() -> str:
@@ -298,6 +450,8 @@ def _now() -> float:
 HANDLERS = {
     "SessionStart": on_session_start,
     "UserPromptSubmit": on_user_prompt,
+    "MessageDisplay": on_message_display,
+    "PostToolBatch": on_post_tool_batch,
     "Stop": on_stop,
     "Notification": on_notification,
     "SessionEnd": on_session_end,

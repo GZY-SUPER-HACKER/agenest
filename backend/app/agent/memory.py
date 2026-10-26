@@ -1156,6 +1156,7 @@ class PiDreamRunner:
             if path.is_file():
                 env[PROVIDER_CONFIG_ENV] = str(path)
         env.setdefault("CSD_AGENT", "1")
+        env.setdefault("CSD_AGENT_PARENT", str(os.getpid()))
         env["CSD_DREAM"] = "1"
         return env
 

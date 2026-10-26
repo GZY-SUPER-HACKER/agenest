@@ -224,6 +224,76 @@ def test_invalid_event_type_is_rejected(session_id: str, client: TestClient) -> 
     assert r.status_code == 422
 
 
+def test_cpctl_offers_every_event_type_the_server_accepts() -> None:
+    """The CLI is a separate zero-dependency package, so the two lists are pinned together.
+
+    A server event the CLI cannot send is a feature nobody can use; this is how the
+    `checkpoint` type would have been silently unusable.
+    """
+    import sys
+    from pathlib import Path
+
+    from app.schemas import EventType
+
+    cpctl = Path(__file__).resolve().parents[2] / "sdk" / "cpctl"
+    if str(cpctl) not in sys.path:
+        sys.path.insert(0, str(cpctl))
+    from cpctl.cli import EVENT_TYPES
+
+    assert set(EVENT_TYPES) == {event.value for event in EventType}
+
+
+def test_cpctl_resolves_the_session_a_connector_published(
+    tmp_path, monkeypatch
+) -> None:
+    """The agent's shell cannot see a connector's session id, so the connector writes it down.
+
+    This pins the cross-package convention: one file per writer under
+    `$CSD_AGENT_HOME/state/sessions.d/`, keyed by working directory. Without it,
+    `cpctl task done` from inside an interactive session would have no id to name.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    cpctl = Path(__file__).resolve().parents[2] / "sdk" / "cpctl"
+    if str(cpctl) not in sys.path:
+        sys.path.insert(0, str(cpctl))
+    from cpctl.cli import Client
+
+    home = tmp_path / "home"
+    work = tmp_path / "project"
+    work.mkdir()
+    map_dir = home / "state" / "sessions.d"
+    map_dir.mkdir(parents=True)
+    (map_dir / "csd-agent.json").write_text(
+        json.dumps(
+            {
+                "writer": "csd-agent",
+                "by_cwd": {
+                    str(work): [
+                        {"session_id": "s_older", "started_at": 1.0},
+                        {"session_id": "s_newer", "started_at": 2.0},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("CSD_AGENT_HOME", str(home))
+    monkeypatch.delenv("CSD_SESSION_ID", raising=False)
+    monkeypatch.chdir(work)
+    client = Client(state_dir=tmp_path / "empty-state")
+
+    assert client._resolve_session(None) == "s_newer"
+    assert client._resolve_session("s_explicit") == "s_explicit"
+
+    # A launcher that owns the run exports the id; it wins over the map outright.
+    monkeypatch.setenv("CSD_SESSION_ID", "s_from_wrapper")
+    assert client._resolve_session(None) == "s_from_wrapper"
+
+
 def test_server_generates_session_id(client: TestClient) -> None:
     r = client.post(
         "/api/sessions", json={"agent_type": "codex", "title": "x"}, headers=INGEST
@@ -486,6 +556,54 @@ def test_last_event_ignores_status_changed(
     assert body["last_event"]["message"] == "writing the patch"
 
 
+def test_a_checkpoint_is_activity_without_moving_status(
+    session_id: str, client: TestClient
+) -> None:
+    """A checkpoint answers "what is it doing now", not "how did this end".
+
+    It must behave like `progress`: surface on the card as the newest activity, and leave the
+    status column alone. §2/§3 are not repealed by a richer event type.
+    """
+    r = report(
+        client,
+        session_id,
+        "checkpoint",
+        "Now I'll add the cursor test",
+        payload={"source": "prose", "turn": 2, "message_id": "m-1"},
+        event_key="cp-1",
+    )
+    assert r.status_code == 202
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "running"
+    assert body["last_event"]["event_type"] == "checkpoint"
+    assert body["last_event"]["message"] == "Now I'll add the cursor test"
+    assert body["last_event"]["payload"]["source"] == "prose"
+
+
+def test_a_checkpoint_does_not_reopen_a_terminal_session(
+    session_id: str, client: TestClient
+) -> None:
+    """Checkpoints arrive mid-work; one landing late must not resurrect a finished row."""
+    report(client, session_id, "session_completed", "done", event_key="done-1")
+    r = report(client, session_id, "checkpoint", "late sentence", event_key="cp-late")
+    assert r.status_code == 202
+    assert client.get(f"/api/sessions/{session_id}", headers=READ).json()["status"] == "completed"
+
+
+def test_duplicate_checkpoint_key_inserts_one_row(
+    session_id: str, client: TestClient
+) -> None:
+    """The connector keys a checkpoint on the agent's own message id.
+
+    A retried `PostToolBatch` therefore re-sends the same sentence without stacking a second
+    row — §7 applies to this event type like every other.
+    """
+    first = report(client, session_id, "checkpoint", "same sentence", event_key="cp-2").json()
+    second = report(client, session_id, "checkpoint", "same sentence", event_key="cp-2").json()
+    assert first["event"]["id"] == second["event"]["id"]
+    assert client.get(f"/api/sessions/{session_id}/events", headers=READ).json()["total"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # awaiting_user: blocked on a human, reported and never inferred              #
 # --------------------------------------------------------------------------- #
@@ -534,6 +652,100 @@ def test_late_awaiting_user_cannot_reopen_a_terminal_session(
     detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
     assert detail["status"] == "completed"
     assert any(e["event_type"] == "awaiting_user" for e in detail["events"])
+
+
+# --------------------------------------------------------------------------- #
+# task verdicts: the work's outcome, beside the run's                         #
+# --------------------------------------------------------------------------- #
+def test_task_failed_lands_after_a_terminal_status_and_moves_no_status(
+    session_id: str, client: TestClient
+) -> None:
+    """The ordinary order is `session_completed` and *then* the verdict.
+
+    Verification runs when the agent exits, so a status gate — the one `awaiting_user` needs
+    to keep a late notification off a finished session — would hide the event entirely. The
+    session stays `completed`, because that is still how the *run* ended; the verdict is what
+    says the *task* did not pass (docs/design.md §40).
+    """
+    report(client, session_id, "session_completed", "agent exited 0")
+    r = report(client, session_id, "task_failed", "pytest: 3 failed")
+    assert r.status_code == 202
+
+    detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert detail["status"] == "completed"
+    assert detail["last_event"]["event_type"] == "task_failed"
+    assert detail["last_verdict"]["event_type"] == "task_failed"
+
+
+def test_task_verdict_survives_the_turn_boundary(
+    session_id: str, client: TestClient
+) -> None:
+    """The verdict is projected separately from `last_event`, and this is why.
+
+    An agent reports its verdict at the end of a turn; the connector's `Stop` reports
+    `turn_completed` immediately afterwards. Reading the verdict off `last_event` would make
+    it visible for a few hundred milliseconds and then hide it behind the boundary that says
+    nothing about the task. `last_verdict` keeps the fact; the client decides whether it still
+    describes the current work.
+    """
+    report(client, session_id, "task_failed", "pytest: 3 failed")
+    report(client, session_id, "turn_completed", "reply finished")
+
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["last_event"]["event_type"] == "turn_completed"
+    assert body["last_verdict"]["event_type"] == "task_failed"
+
+
+def test_task_completed_is_the_positive_verdict(
+    session_id: str, client: TestClient
+) -> None:
+    """Symmetric with `task_failed`, and it closes nothing either."""
+    r = report(client, session_id, "task_completed", "12 tests pass")
+    assert r.status_code == 202
+
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "running"
+    assert body["finished_at"] is None
+    assert body["last_verdict"]["event_type"] == "task_completed"
+
+
+def test_a_newer_verdict_replaces_the_older_one(
+    session_id: str, client: TestClient
+) -> None:
+    """One session, one current verdict: the last thing the agent said about the task."""
+    report(client, session_id, "task_failed", "first attempt failed")
+    report(client, session_id, "task_completed", "second attempt passed")
+
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["last_verdict"]["event_type"] == "task_completed"
+
+
+def test_a_later_progress_event_is_newer_than_the_verdict(
+    session_id: str, client: TestClient
+) -> None:
+    """The verdict stays in the record; whether it still describes the work is display.
+
+    A retry reports progress, and the client stops showing the old verdict — but nothing
+    rewrites history, and the verdict remains the newest one reported.
+    """
+    report(client, session_id, "task_failed", "tests failed")
+    report(client, session_id, "progress", "retrying with a different approach")
+
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["last_event"]["event_type"] == "progress"
+    assert body["last_verdict"]["event_type"] == "task_failed"
+
+
+def test_every_event_type_is_either_terminal_or_descriptive() -> None:
+    """A new event type must land on one side of the line.
+
+    The server stores an unclassified type, but no reader would know whether it may close a
+    session. This is the assertion the next person adding one meets, instead of a silent
+    ambiguity about what the event does to `status`.
+    """
+    from app.schemas import NON_TERMINAL_EVENTS, TERMINAL_EVENTS, EventType
+
+    assert set(EventType) == set(NON_TERMINAL_EVENTS) | set(TERMINAL_EVENTS)
 
 
 # --------------------------------------------------------------------------- #

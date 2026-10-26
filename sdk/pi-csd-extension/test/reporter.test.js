@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import {
+  assistantText,
   firstLine,
   install,
   outcomeFor,
@@ -23,6 +24,9 @@ import {
 } from '../csd-reporter.js'
 
 const QUIET = { warn() {}, info() {}, log() {} }
+// The reporter publishes `{cwd → session id}` under `$CSD_AGENT_HOME` for `cpctl task` to
+// find. Point it at a scratch directory so a test run never touches the real ~/.csd.
+process.env.CSD_AGENT_HOME = mkdtempSync(join(tmpdir(), 'csd-pi-test-'))
 const CONFIG = {
   baseUrl: 'http://dashboard',
   token: 'test-token',
@@ -118,6 +122,22 @@ test('firstLine takes the first presentable line and keeps the ellipsis inside t
   assert.ok(long.endsWith('…'))
 })
 
+test('assistantText keeps prose and drops thinking and tool blocks', () => {
+  assert.equal(
+    assistantText({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', text: 'hmm' },
+        { type: 'text', text: 'Now I will fix it' },
+        { type: 'toolCall', name: 'edit' },
+      ],
+    }),
+    'Now I will fix it',
+  )
+  assert.equal(assistantText({ role: 'assistant', content: [] }), '')
+  assert.equal(assistantText({ role: 'user', content: [{ type: 'text', text: 'hi' }] }), '')
+})
+
 test('projectName is the last segment, whichever separator the host used', () => {
   assert.equal(projectName('/work/demo'), 'demo')
   assert.equal(projectName('C:\\\\Users\\\\pi\\\\demo'), 'demo')
@@ -210,10 +230,40 @@ test('CSD_PI_ENV_FILE names another env file', () => {
 test('two switches make the reporter inert: a dashboard-owned child, and the operator’s no', () => {
   assert.equal(resolveConfig({ config: { envFile: false }, env: { CSD_AGENT: '1' } }).disabled, true)
   assert.equal(
+    resolveConfig({
+      config: { envFile: false },
+      env: { CSD_AGENT: '1', CSD_AGENT_PARENT: String(process.ppid) },
+    }).disabled,
+    true,
+    'the direct child the backend spawned is the Agent tab talking to itself',
+  )
+  assert.equal(
+    resolveConfig({
+      config: { envFile: false },
+      env: { CSD_AGENT: '1', CSD_AGENT_PARENT: String(process.ppid + 1) },
+    }).disabled,
+    false,
+    'a pi run the personal agent spawns inherits the marker but not the parent — it reports',
+  )
+  assert.equal(
     resolveConfig({ config: { envFile: false }, env: { CSD_PI_REPORTER: '0' } }).disabled,
     true,
   )
   assert.equal(resolveConfig({ config: { envFile: false }, env: {} }).disabled, false)
+})
+
+test('a coding run spawned by the personal agent still reports', () => {
+  const pi = fakePi()
+  const client = new FakeClient()
+  install(pi, {
+    config: { ...CONFIG },
+    client,
+    env: { CSD_AGENT: '1', CSD_AGENT_PARENT: String(process.ppid + 1) },
+    home: '/home/pi',
+    logger: QUIET,
+  })
+
+  assert.ok(pi.handlers.size > 0, 'the inherited marker is not enough to silence a grandchild')
 })
 
 test('a dashboard-owned Pi child registers nothing and says nothing', () => {
@@ -301,6 +351,64 @@ test('turns are progress events with stable keys, numbered from one', async () =
   assert.deepEqual(events[0].body.payload.turn, 1)
   assert.equal(events[1].body.message, 'turn 2 complete')
   assert.match(events[1].body.event_key, /:turn:2$/)
+})
+
+test('a turn followed by tools reports the agent sentence as a checkpoint', async () => {
+  const { pi, client, handle } = setup()
+  await pi.emit('before_agent_start', PROMPT, CTX)
+  await pi.emit(
+    'turn_end',
+    {
+      turnIndex: 0,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Now I will fix the flaky test' }],
+        stopReason: 'toolUse',
+      },
+      toolResults: [{ toolCallId: 't1' }],
+    },
+    CTX,
+  )
+  await handle.flush()
+
+  const events = client.of('event')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].body.event_type, 'checkpoint')
+  assert.equal(events[0].body.message, 'Now I will fix the flaky test')
+  assert.match(events[0].body.event_key, /:checkpoint$/)
+  assert.equal(events[0].body.payload.source, 'prose')
+})
+
+test('after a checkpoint, a tool-only turn does not add a step line', async () => {
+  const { pi, client, handle } = setup()
+  await pi.emit('before_agent_start', PROMPT, CTX)
+  await pi.emit(
+    'turn_end',
+    {
+      turnIndex: 0,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Now I will fix the flaky test' }],
+        stopReason: 'toolUse',
+      },
+      toolResults: [{ toolCallId: 't1' }],
+    },
+    CTX,
+  )
+  await pi.emit(
+    'turn_end',
+    {
+      turnIndex: 1,
+      message: { role: 'assistant', content: [], stopReason: 'toolUse' },
+      toolResults: [{ toolCallId: 't2' }],
+    },
+    CTX,
+  )
+  await handle.flush()
+
+  const events = client.of('event')
+  assert.equal(events.length, 1, 'the checkpoint is the progress track for this run')
+  assert.equal(events[0].body.event_type, 'checkpoint')
 })
 
 test('agent_settled closes the run with the last assistant stop reason', async () => {

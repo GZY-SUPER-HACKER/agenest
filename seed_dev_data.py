@@ -8,6 +8,11 @@ One session is seeded *blocked on the user* (`awaiting_user`), because that stat
 the overview groups on besides failure, and it is the only one that cannot be produced by
 poking at the API with a status patch — it is an event, not a status.
 
+One more is seeded *completed but the task failed* (`task_failed`): the run exited 0, a
+verifier said the work did not pass. Its positive twin (`task_completed`) is seeded too, so both
+badges can be judged. Both are deliberately posted after the `completed` patch — the ordinary
+order (design.md §40).
+
 `--fresh` backdates nothing: it just re-seeds with timestamps as of now, so the "maybe
 offline" state does not blanket every row 45 seconds after the seed.
 """
@@ -119,11 +124,39 @@ SEED = [
             "Need a decision on which one wins",
         ],
     ),
+    (
+        "claude_code",
+        "webapp",
+        "Speed up the session-list query",
+        "task_failed",
+        [
+            "Explain the query plan",
+            "Add the composite index",
+            "Run the benchmark",
+            "p95 down from 480ms to 210ms; the target was 150ms",
+        ],
+    ),
+    (
+        "codex",
+        "billing",
+        "Backfill a migration test for the new column",
+        "task_done",
+        [
+            "Read the migration helper",
+            "Add a case for the nullable column",
+            "Run npm test --workspace=core",
+            "19 passed",
+        ],
+    ),
 ]
 
 #: Seeded as an event, not a status patch: a session blocked on a human has no distinct
 #: status — it is still `running`. The dashboard reads it off the newest event.
 AWAITING_MESSAGE = "Claude needs your permission to run psql against the staging database"
+
+#: The run finished cleanly; the verifier did not. Reported as an event so it can land after
+#: `completed` — which is exactly how a real verification runs (design.md §40).
+TASK_FAILED_MESSAGE = "benchmark did not meet the target: p95 210ms > 150ms"
 
 
 def post(path: str, payload: dict) -> dict:
@@ -160,6 +193,23 @@ def main() -> None:
             # between rows instead of all reading "now".
             time.sleep(0.4)
 
+            # One agent-authored sentence per running session, so the seeded timeline shows
+            # the `checkpoint` event without needing a real Claude Code run (design.md §37).
+            if terminal_status == "running" and i == 0:
+                post(
+                    f"/api/sessions/{sid}/events",
+                    {
+                        "event_type": "checkpoint",
+                        "message": f"Now I'll work on: {step}",
+                        "payload": {
+                            "source": "prose",
+                            "turn": 1,
+                            "message_id": f"seed-{sid}-{i}",
+                        },
+                        "event_key": f"seed-checkpoint-{sid}-{i}",
+                    },
+                )
+
         if terminal_status in ("running", "awaiting_user"):
             for _ in range(2):
                 post(
@@ -192,6 +242,40 @@ def main() -> None:
                 json={"status": "completed", "summary": steps[-1], "exit_code": 0},
                 headers=H,
                 timeout=10,
+            )
+        elif terminal_status == "task_failed":
+            httpx.patch(
+                f"{BASE}/api/sessions/{sid}",
+                json={"status": "completed", "summary": steps[-1], "exit_code": 0},
+                headers=H,
+                timeout=10,
+            )
+            # Deliberately after the close: the session is already terminal, and the event
+            # still lands. That ordering is the reason this is an event and not a field.
+            post(
+                f"/api/sessions/{sid}/events",
+                {
+                    "event_type": "task_failed",
+                    "message": TASK_FAILED_MESSAGE,
+                    "payload": {"source": "verifier", "exit_code": 1},
+                    "event_key": f"seed-task-failed-{sid}",
+                },
+            )
+        elif terminal_status == "task_done":
+            httpx.patch(
+                f"{BASE}/api/sessions/{sid}",
+                json={"status": "completed", "summary": steps[-1], "exit_code": 0},
+                headers=H,
+                timeout=10,
+            )
+            post(
+                f"/api/sessions/{sid}/events",
+                {
+                    "event_type": "task_completed",
+                    "message": "19 tests pass",
+                    "payload": {"source": "agent"},
+                    "event_key": f"seed-task-done-{sid}",
+                },
             )
         elif terminal_status == "interrupted":
             httpx.patch(

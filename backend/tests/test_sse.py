@@ -186,14 +186,20 @@ def test_session_frame_carries_every_field_the_client_type_declares() -> None:
         id=7, session_id="s_1", event_type="awaiting_user", message="needs permission",
         occurred_at="t", received_at="t",
     )
+    verdict = EventOut(
+        id=8, session_id="s_1", event_type="task_failed", message="tests failed",
+        occurred_at="t", received_at="t",
+    )
     session = SessionOut(
         id="s_1", agent_type="codex", title="t", status="running", workspace="/w",
         host="lab-box",
         started_at="t", last_activity_at="t", created_at="t", updated_at="t",
         last_event=event,
+        last_verdict=verdict,
     )
     payload = session_frame(session)["session"]
     assert payload["last_event"]["event_type"] == "awaiting_user"
+    assert payload["last_verdict"]["event_type"] == "task_failed"
     assert payload["workspace"] == "/w"
     # The rail nests a session under its machine, so a frame without this would move the card
     # to the "no host recorded" group on the very event that updated it.

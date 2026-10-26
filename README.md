@@ -59,7 +59,7 @@ process) that needs nothing but a provider key.
 
 | Layer | What works today |
 |---|---|
-| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), DeepSeek Harness / `dsh` and standalone Pi (reporters wired by the same `csd-agent install`), Codex, or anything that can call `cpctl` from a wrapper |
+| Coding agents (observed and driven) | Claude Code (hooks), Codex (hooks), DeepSeek Harness / `dsh`, and standalone Pi — reporters wired by the same `csd-agent install` — or anything that can call `cpctl` from a wrapper |
 | Personal agents (the channel) | `native` — the built-in personal agent, **built on Pi** (`@earendil-works/pi-coding-agent`); nanobot; OpenClaw; Hermes Agent |
 
 The built-in `native` agent is a Pi process this service starts itself. **Pi is the agent loop;
@@ -195,12 +195,27 @@ cpctl event -m "Tests green" --payload "stage=testing,tests=42"
 # and the next event of any kind clears it again.
 cpctl event --type awaiting_user -m "needs approval to run the migration"
 
-# 3. Finish with the real outcome
+# A sentence the agent wrote while working — not a status, not a plan. `source` says where
+# it came from, so the page can never draw a machine fact as the agent's own words.
+cpctl event --type checkpoint -m "Now I'll add the cursor test" \
+  --payload '{"source":"prose","turn":3}'
+
+# The *work* succeeded or failed, whatever the run did. `task done` / `task failed` are
+# verdicts, not statuses: an agent that exits 0 can still have failed the task, and a run that
+# is already closed can still receive one. The newest verdict wins; no verdict means nobody
+# claimed either way.
+cpctl task done   -m "12 tests pass"
+cpctl task failed -m "pytest -q: 3 failed"
+
+# 4. Finish with the real outcome
 cpctl session finish --status completed --summary "12 tests pass" --exit-code 0
 cpctl session finish --status failed     --summary "blocked on upstream" --exit-code 1
 ```
 
-`cpctl event` uses the cached session id, so the common case is just `-m`.
+`cpctl event` and `cpctl task` use the cached session id, so the common case is just `-m`.
+When a connector (csd-agent / Pi / DSH / nanobot) created the session, `cpctl` resolves it from
+`~/.csd/state/sessions.d/` instead — the agent does not have to know an id. `csd-agent skill
+install` writes the launcher and the Claude Code skill that tell an agent when to call this.
 
 ### Wrapping an actual agent
 
@@ -271,8 +286,8 @@ the script prints the scp-able steps to mint one that is scoped to a single port
 ### Option A: `csd-agent` (Claude Code, DeepSeek Harness and Pi, and the supported path)
 
 [sdk/csd-agent](sdk/csd-agent/) owns the whole agent-host side — the tunnel, the credentials,
-the liveness probe, the Claude Code hooks, and the DeepSeek Harness and Pi reporters. One
-command on the agent host, no sudo, no pip:
+the liveness probe, the Claude Code hooks, the DeepSeek Harness and Pi reporters, and the
+task-verdict launcher/skill. One command on the agent host, no sudo, no pip:
 
 ```bash
 scp -r sdk/csd-agent sdk/cpctl sdk/dsh-csd-plugin sdk/pi-csd-extension you@agent-host:~/csd-src/
@@ -332,29 +347,25 @@ It opens a session, traps INT/TERM to mark the session interrupted, runs the age
 (no output captured or parsed), and closes with the agent's real exit code. It exits with the
 agent's status, never the reporter's.
 
+**An agent that exits 0 can still have failed the task**, and nothing in its exit status says
+which. Give the wrapper a verifier and its exit code becomes a reported verdict:
+
+```bash
+./run-agent.sh --verdict "pytest -q" -- claude -p "fix the flaky test"
+```
+
+The verifier runs after a clean agent exit; a non-zero result reports a `task_failed` event and
+closes the session as failed, and a passing one reports `task_completed`. It does not change
+the wrapper's exit status — that remains the agent's. See [docs/design.md](docs/design.md) §40.
+
 DSH's one-shot `headless` profile fits the same shape:
 `CSD_AGENT_TYPE=dsh ./run-agent.sh -- dsh --profile headless "run the tests"`. Its interactive
 web profile is what the `csd-agent` reporter above is for.
 
-### Option C: a nanobot hook (in-process, no wrapper)
-
-nanobot exposes a documented lifecycle interface (`nanobot/agent/hook.py::AgentHook` with
-`before_run` / `after_run` / `on_error` / `on_finally`). [sdk/csd_nanobot.py](sdk/csd_nanobot.py)
-implements it, verified against nanobot's own `CompositeHook` dispatch:
-
-```python
-from nanobot.agent.loop import AgentLoop
-from csd_nanobot import DashboardHook
-
-loop = AgentLoop(config=..., hooks=[DashboardHook(agent_type="nanobot")], ...)
-```
-
-**Turn-level hooks are deliberately not wired.** They see every internal step of the agent's
-reasoning, and reporting them would mean the dashboard claims to show agent internals it
-inferred from a hook — the thing the design says it does not do. See the module docstring.
-
-The hook finds `cpctl` automatically (installed entry point → `PATH` → the copy next to it in
-`sdk/`), passes `PYTHONPATH` when it uses the local copy, and never blocks the event loop.
+**nanobot is not a coding-session harness.** It is a *personal agent*, the thing the Agent tab
+talks to, and it has no session reporter on purpose. A nanobot hook that mirrored its runs into
+Sessions made the channel look like work being observed; the two roles are separate, and only
+the Agent tab connects to it.
 
 ---
 
@@ -786,6 +797,29 @@ stays `running`, and the next prompt (`progress`) clears it. A session that is o
 working is neither "running now" nor finished, so it gets its own count in the overview and
 its own filter chip in the rail.
 
+**A checkpoint is the agent's own sentence.** Between the prompt and the reply boundary there
+used to be nothing; `checkpoint` events fill that gap with text the agent wrote ("Now I'll add
+the cursor test") — one per stage, not one per tool call. `csd-agent` accumulates
+`MessageDisplay` and reports only when a later `PostToolBatch` proves a tool followed the
+message, so an answer is never mistaken for progress. Pi does the same with
+`turn_end.toolResults`; DSH uses `assistant/message` and turns its `todo/write` whole-list
+snapshot into a `source: "plan"` checkpoint. Codex's hooks expose no intermediate prose, so
+that reporter stays turn-level and sends none. A reporter with no prose surface sends none;
+the absence is honest. See design.md §37 and §38.
+
+**A task verdict is its own report.** `failed` used to mean two different things: the agent's
+run failed (an API error, a crash) and the work failed (tests red, build broken). An agent can
+exit 0 and still have failed the task — for `claude -p` that is the ordinary case. The verdict
+is a `task_failed` or `task_completed` event, reported by the agent itself (`cpctl task
+done|failed`, installed as a skill by `csd-agent skill install`), a verifier
+(`run-agent.sh --verdict "pytest -q"`), or the orchestrator — never inferred from an exit code
+or the final prose, and never expected from the agent runtime, whose vocabulary is
+`error`/`stop`. It moves no status, so it can land after the session has closed. It is
+projected onto the session as `last_verdict`, separately from `last_event`, because the
+`turn_completed` that follows an agent's own report would otherwise hide it. A completed run
+with a `task_failed` verdict sits under needs-attention, not finished; `task_completed` is the
+positive half and stays where it was. See design.md §40.
+
 **SSE is a notification, not a record.** The stream carries `id:` (a database event id) so a
 reconnecting client resumes with `?cursor=<id>`. A client that was away longer than the
 replay buffer (2048 frames) re-fetches `/api/sessions/{id}/events`; the stream alone is never
@@ -1004,7 +1038,6 @@ backend/
 sdk/
   cpctl/          the reporting CLI
   csd-agent/      the agent-host side: tunnel, liveness probe, Claude Code hooks
-  csd_nanobot.py  a DashboardHook that reports a nanobot run's lifecycle
   agent-host-preflight.sh  proves the agent-host → cloud path, one leg at a time
 frontend/         React + Vite, phone-first, hash routing, two tabs
   src/pages/AgentPage.tsx   the agenest conversation

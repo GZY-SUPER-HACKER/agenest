@@ -718,6 +718,10 @@ class NativeBackend(AgentBackend):
                     path,
                 )
         env.setdefault("CSD_AGENT", "1")
+        # The ownership marker is scoped to this direct child. A `pi` run the personal agent
+        # spawns inherits both values, but its ppid is the personal agent, not this backend —
+        # so the reporter knows it is a coding run and reports it (§31).
+        env.setdefault("CSD_AGENT_PARENT", str(os.getpid()))
         if self._appendix_extension() is not None:
             # Which files make up the appendix is *this backend's* business (the generated memory
             # appendix, the operator's machines file), so they are handed over rather than

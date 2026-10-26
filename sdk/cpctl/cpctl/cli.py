@@ -36,6 +36,25 @@ from pathlib import Path
 
 PROG = "cpctl"
 
+#: Mirrors `backend/app/schemas.py`'s `EventType`. The CLI is a separate, zero-dependency
+#: package and cannot import the server, so `test_cpctl_offers_every_event_type_the_server_accepts`
+#: pins the two lists together: a server event the CLI cannot send is a feature nobody can use.
+EVENT_TYPES = (
+    "session_started",
+    "status_changed",
+    "progress",
+    "note",
+    "awaiting_user",
+    "turn_completed",
+    "checkpoint",
+    "task_failed",
+    "task_completed",
+    "session_completed",
+    "session_failed",
+    "session_interrupted",
+    "heartbeat",
+)
+
 #: Exit code for "the report did not reach the server". Deliberately non-zero but distinct
 #: from usage errors (2) so a wrapper script can log it without masking a real CLI mistake.
 EXIT_REPORT_FAILED = 3
@@ -141,6 +160,28 @@ class Client:
         if args.payload:
             body["payload"] = _parse_payload(args.payload)
 
+        result = self._request("POST", f"/api/sessions/{session_id}/events", body)
+        print(result["event"]["id"])
+        return 0
+
+    def task(self, args: argparse.Namespace) -> int:
+        """Report the task verdict, not the run's lifecycle.
+
+        `task done` / `task failed` is the one thing an agent can say that its runtime
+        cannot: the run may have ended cleanly and the work still did not pass. It moves no
+        status — the server treats both as display events — so it is safe on a session that
+        is still running and on one that has already closed (docs/design.md §40).
+        """
+        session_id = self._resolve_session(args.session)
+        event_type = "task_completed" if args.verdict == "done" else "task_failed"
+        payload = _parse_payload(args.payload) if args.payload else {}
+        payload.setdefault("source", args.source)
+        body = {
+            "event_type": event_type,
+            "message": args.message,
+            "event_key": args.key or self._auto_key(session_id, event_type, args.message),
+            "payload": payload,
+        }
         result = self._request("POST", f"/api/sessions/{session_id}/events", body)
         print(result["event"]["id"])
         return 0
@@ -299,12 +340,23 @@ class Client:
     def _resolve_session(self, explicit: str | None) -> str:
         if explicit:
             return explicit
+        # A launcher that owns the run (run-agent.sh) exports this, so the agent can report a
+        # verdict from its own shell without being told an id it cannot know.
+        from_env = os.environ.get("CSD_SESSION_ID", "").strip()
+        if from_env:
+            return from_env
         cached = self._load_id()
         if cached:
             return cached
+        # A connector created the session in a process the agent cannot see. It leaves the id
+        # in a small per-writer map keyed by working directory; see csd_agent.tracked and the
+        # Pi/DSH/nanobot reporters.
+        mapped = _session_from_connector_map(Path.cwd())
+        if mapped:
+            return mapped
         raise ReportError(
-            "no session id given and none cached. Run `cpctl session start` first, "
-            "or pass --session <id>."
+            "no session id given and none cached. Run `cpctl session start` first, pass "
+            "`--session <id>`, or let a connector (csd-agent / Pi / DSH) report the run."
         )
 
     @staticmethod
@@ -323,6 +375,60 @@ class Client:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _cwd_key(value: object) -> str:
+    """One spelling per directory, across the Python and Node connectors.
+
+    The agent's shell may hand us a Git-Bash path, the connector stored a native one, and
+    Windows does not care about case. `abspath` + `normcase` is the smallest rule that makes
+    `C:\\Repo`, `C:/Repo` and `c:\\repo` the same key on Windows, and is the identity on
+    POSIX.
+    """
+    return os.path.normcase(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def _session_from_connector_map(cwd) -> str | None:
+    """Resolve the session a connector opened in this directory.
+
+    Connectors run in a process the agent cannot see, so they cannot put an id in its
+    environment. Each writer leaves its own file under `~/.csd/state/sessions.d/` instead —
+    no shared file, no cross-writer lock. The newest live entry for this directory wins; a
+    writer removes its entry when the run ends, so a stale one only survives a crash.
+    """
+    home = Path(os.environ.get("CSD_AGENT_HOME") or (Path.home() / ".csd"))
+    directory = home / "state" / "sessions.d"
+    try:
+        paths = list(directory.glob("*.json"))
+    except OSError:
+        return None
+
+    target = _cwd_key(cwd)
+    best: tuple[float, str] | None = None
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        by_cwd = data.get("by_cwd") if isinstance(data, dict) else None
+        if not isinstance(by_cwd, dict):
+            continue
+        for raw_cwd, entries in by_cwd.items():
+            if not isinstance(raw_cwd, str) or _cwd_key(raw_cwd) != target:
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                session_id = entry.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    continue
+                started = entry.get("started_at")
+                score = float(started) if isinstance(started, (int, float)) else 0.0
+                if best is None or score > best[0]:
+                    best = (score, session_id)
+    return best[1] if best else None
+
+
 def _parse_payload(raw: str) -> dict:
     """`key=value,key=value` or a JSON object. Keeps shell quoting simple for the common
     `stage=testing` case without giving up structure."""
@@ -465,23 +571,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--type",
         dest="type",
         default="progress",
-        choices=[
-            "session_started",
-            "status_changed",
-            "progress",
-            "note",
-            "awaiting_user",
-            "turn_completed",
-            "session_completed",
-            "session_failed",
-            "session_interrupted",
-            "heartbeat",
-        ],
+        choices=list(EVENT_TYPES),
     )
     event.add_argument("--message", "-m", required=True, help="short human-readable message")
     event.add_argument("--key", help="idempotency key (default: derived from the message)")
     event.add_argument("--at", help="ISO-8601 time the event actually happened")
     event.add_argument("--payload", help='extra data: "stage=testing" or {"stage":"testing"}')
+
+    # The verdict is not a status: `task done` / `task failed` says whether the *work*
+    # succeeded, while `session finish` says how the *run* ended. An agent that exits 0 can
+    # still fail the task, and the runtime has no way to say so (docs/design.md §40).
+    task = sub.add_parser(
+        "task", help="say whether the task succeeded, not how the run ended"
+    )
+    task_cmd = task.add_subparsers(dest="verdict", required=True)
+    for name, helptext in (
+        ("done", "the task the user asked for succeeded"),
+        ("failed", "the task failed, or could not be completed"),
+    ):
+        verdict = task_cmd.add_parser(name, help=helptext)
+        verdict.add_argument(
+            "--session",
+            help="session id (default: $CSD_SESSION_ID, the cached id, or the connector map)",
+        )
+        verdict.add_argument(
+            "--message",
+            "-m",
+            required=True,
+            help="one line: what you verified, or what is wrong / left",
+        )
+        verdict.add_argument(
+            "--source",
+            default="agent",
+            help="who is making the claim: agent (default), verifier, orchestrator",
+        )
+        verdict.add_argument(
+            "--payload", help='extra data: "tests=42" or {"tests":42}'
+        )
+        verdict.add_argument(
+            "--key", help="idempotency key (default: derived from the message)"
+        )
 
     sub.add_parser("status", help="show the cached session id for this directory")
 
@@ -576,6 +705,8 @@ def main(argv: list[str] | None = None) -> int:
                 return client.update(args)
         if args.command == "event":
             return client.event(args)
+        if args.command == "task":
+            return client.task(args)
         if args.command == "host":
             if args.action == "report":
                 return client.host_report(args)

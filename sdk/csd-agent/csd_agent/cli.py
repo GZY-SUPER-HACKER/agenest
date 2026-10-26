@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, dsh, heartbeat, hooks, host, install, pi
+from . import codex, codex_hooks, config, dsh, heartbeat, hooks, host, install, pi, skill
 
 
 def _default_python() -> str:
@@ -90,6 +90,13 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="do not wire the standalone Pi CLI even when it is installed")
     ins.add_argument("--pi-home", default=None,
                      help="Pi agent directory (default: $PI_CODING_AGENT_DIR or ~/.pi/agent)")
+    ins.add_argument("--no-codex", action="store_true",
+                     help="do not wire Codex's hooks even when it is installed")
+    ins.add_argument("--codex-home", default=None,
+                     help="Codex home (default: $CODEX_HOME or ~/.codex)")
+    ins.add_argument("--no-skill", action="store_true",
+                     help="do not write the agent-side task-verdict launcher and Claude Code "
+                          "skill (it lets the agent report done/failed itself)")
 
     sub.add_parser("uninstall", help="stop the units and remove the hook entries")
     sub.add_parser("status", help="what this host believes, and whether it is connected")
@@ -100,6 +107,12 @@ def _build_parser() -> argparse.ArgumentParser:
     hk = sub.add_parser("hook", help="Claude Code hook entry point (reads JSON on stdin)")
     hk.add_argument("event", nargs="?", help="hook event name")
     hk.add_argument("--payload", help="payload as a string instead of on stdin (for testing)")
+
+    # Codex's event names overlap Claude Code's, and so do some fields; a separate entry point
+    # keeps the two adapters from guessing which agent sent the payload.
+    hkc = sub.add_parser("hook-codex", help="Codex hook entry point (reads JSON on stdin)")
+    hkc.add_argument("event", nargs="?", help="hook event name")
+    hkc.add_argument("--payload", help="payload as a string instead of on stdin (for testing)")
 
     # DSH is wired by `install` too. This verb exists for a host that runs DSH but not Claude
     # Code, and for re-wiring a single profile without touching anything else.
@@ -129,6 +142,28 @@ def _build_parser() -> argparse.ArgumentParser:
     pi_status.add_argument("--home", default=None)
     pi_un = pi_sub.add_parser("uninstall", help="remove the reporter from Pi")
     pi_un.add_argument("--home", default=None)
+
+    # Codex is wired by `install` too. This verb exists for a host that runs Codex but not
+    # Claude Code, and for re-merging the hooks file without touching anything else.
+    codex_cmd = sub.add_parser("codex", help="Codex reporter only")
+    codex_sub = codex_cmd.add_subparsers(dest="codex_action", required=True)
+    codex_ins = codex_sub.add_parser("install", help="merge the reporter into Codex hooks.json")
+    codex_ins.add_argument("--home", default=None,
+                           help="Codex home (default: $CODEX_HOME or ~/.codex)")
+    codex_status = codex_sub.add_parser("status", help="whether Codex hooks are installed")
+    codex_status.add_argument("--home", default=None)
+    codex_un = codex_sub.add_parser("uninstall", help="remove the reporter from Codex hooks.json")
+    codex_un.add_argument("--home", default=None)
+
+    # The agent-side verdict path: a launcher the agent can run from its own shell, and the
+    # skill that tells it when to. Optional — the wrapper and the connectors do not need it.
+    skill_cmd = sub.add_parser(
+        "skill", help="the agent-side task-verdict skill (Claude Code)"
+    )
+    skill_sub = skill_cmd.add_subparsers(dest="skill_action", required=True)
+    skill_sub.add_parser("install", help="write the launcher and the skill")
+    skill_sub.add_parser("status", help="whether they are installed")
+    skill_sub.add_parser("uninstall", help="remove them")
 
     return parser
 
@@ -196,8 +231,16 @@ def _cmd_install(args: argparse.Namespace) -> int:
         dsh_home=args.dsh_home,
         no_pi=args.no_pi,
         pi_home=args.pi_home,
+        no_codex=args.no_codex,
+        codex_home=args.codex_home,
     )
-    return installer.run()
+    code = installer.run()
+    if code == 0 and not getattr(args, "no_skill", False):
+        # The agent-side verdict path. Optional, but this is the one command the operator
+        # runs, and the files are two small things under `$HOME` that `uninstall` reverses.
+        for line in skill.install():
+            print(f"  {line}")
+    return code
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -254,6 +297,16 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         print(f"pi         : {pi_target} — present but not ours")
     else:
         print(f"pi         : {pi_home} — extension not installed")
+
+    codex_events = codex.installed_events()
+    codex_path = codex.hooks_path(codex.codex_home())
+    if codex_events:
+        print(f"codex      : {codex_path} — {', '.join(codex_events)}")
+        print("             (Codex trusts them after you approve them)")
+    elif codex_path.exists():
+        print(f"codex      : {codex_path} — present, not ours")
+    else:
+        print(f"codex      : {codex_path} — hooks not installed")
 
     if shutil.which("systemctl"):
         units = ["csd-heartbeat.timer"] if cfg.local or cfg.direct_url else [
@@ -422,13 +475,48 @@ def _cmd_pi(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_codex(args: argparse.Namespace) -> int:
+    """The standalone Codex path, for a host that runs no Claude Code.
+
+    `csd-agent install` calls the same module; this verb is not a second implementation.
+    """
+    home = Path(args.home).expanduser() if getattr(args, "home", None) else None
+    if args.codex_action == "status":
+        return codex.status(home)
+    if args.codex_action == "install":
+        result = codex.install(home)
+        for line in result.notes:
+            print(f"  {line}")
+        return 0 if result.ok else 1
+    if args.codex_action == "uninstall":
+        return codex.uninstall(home)
+    print(f"unsupported codex action: {args.codex_action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_skill(args: argparse.Namespace) -> int:
+    if args.skill_action == "install":
+        for line in skill.install():
+            print(f"  {line}")
+        return 0
+    if args.skill_action == "status":
+        return skill.status()
+    if args.skill_action == "uninstall":
+        return skill.uninstall()
+    print(f"unsupported skill action: {args.skill_action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.command == "install":
         return _cmd_install(args)
     if args.command == "uninstall":
-        return install.uninstall()
+        code = install.uninstall()
+        # Written by `install`, so removed with it; only our marked files are touched.
+        skill.uninstall()
+        return code
     if args.command == "status":
         return _cmd_status(args)
     if args.command == "heartbeat":
@@ -436,10 +524,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         # hooks.run never raises and always returns 0, by design.
         return hooks.run(args.event, args.payload)
+    if args.command == "hook-codex":
+        return codex_hooks.run(args.event, args.payload)
     if args.command == "dsh":
         return _cmd_dsh(args)
     if args.command == "pi":
         return _cmd_pi(args)
+    if args.command == "codex":
+        return _cmd_codex(args)
+    if args.command == "skill":
+        return _cmd_skill(args)
 
     print(f"unsupported command: {args.command}", file=sys.stderr)
     return 2

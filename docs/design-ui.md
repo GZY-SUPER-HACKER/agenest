@@ -213,6 +213,33 @@ session 只报了机器名、但那台机器的 connector 从没注册过（`cpc
 代价说清楚：checkpoint 从外观上不再与回答有区别。"还在干活"这件事由工具行承担——对另外三个
 agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 
+### dashboard 时间线里的 checkpoint 是另一个概念
+
+上面说的是 agenest 对话里的 checkpoint：模型写的一段话，按普通气泡渲染。dashboard 的
+`checkpoint` 事件是 **session 时间线**上的一行，来自 coding agent 自己写的一句话
+（docs/design.md §37）。它不画成气泡，也不进入 status pill：
+
+- 圆点用空心 accent，和 turn boundary 一样——它是"在干活"，不是"结果"；
+- 正文用 `--ink`，因为它是 agent 对读者说的话，不是机器行；`progress` 仍然用 `--ink-2`；
+- payload 里的 `message_id` 不显示，它是幂等键，不是读者需要的信息；
+- 它不进入 needs-attention，也不改变 status；`idle` 会被它清掉（有 checkpoint 就说明又开始干活了）。
+
+没有 checkpoint 的 session 不显示任何占位。"这个 agent 没有中间报告"是诚实的，用工具名或耗时
+补一句话不是。
+
+`task_failed` / `task_completed` 是另一种事件行（docs/design.md §40）：进程可能干净退出，但
+校验或 agent 自己判定活成没成。
+
+- `task_failed` 圆点用实心 `--dead`，`task_completed` 用实心 `--ok`——它们是**结果**，不是在
+  干活；
+- 它们来自 session 的 `last_verdict`，而不是 `last_event`: agent 报完 verdict 后紧跟的
+  `turn_completed` 会把 `last_event` 顶掉。`last_verdict` 只要没有更新的 `progress` /
+  `checkpoint` 就仍然描述当前任务；`turn_completed`、`awaiting_user`、`note` 不算"又开始干活"；
+- `task_failed` **进入** needs-attention，而且**不看 status**：`completed` 一样进；
+  `task_completed` 不改变分组，只在卡片上给一个安静的 "task done"；
+- 分区时 task-failed 从 running / idle / finished 里扣掉，保证 tile 仍然精确相加；
+- 状态胶囊不变：它说的是**进程怎么结束的**，verdict 说的是**活成没成**，两个事实都保留。
+
 ## 附件：卡片，不是链接
 
 文件在对话里是**卡片**，不是一行带下划线的链接。卡片把三个问题一次答完：这是什么（名字 +

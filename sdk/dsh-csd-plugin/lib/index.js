@@ -33,6 +33,10 @@
  * child and make the rail read as more work than happened.
  */
 
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+
 import { resolveConfig } from './config.js'
 import { autoKey, firstLine, ReportClient, titleFromContent, turnOutcome } from './reporter.js'
 
@@ -46,6 +50,8 @@ export const inject = ['sessions']
 const TURN_START = 'turn/start'
 const TURN_END = 'turn/end'
 const STEP_END = 'step/end'
+const ASSISTANT_MESSAGE = 'assistant/message'
+const TODO_WRITE = 'todo/write'
 const USER_MESSAGE = 'user/message'
 const SESSION_TITLE = 'session/title'
 const APPROVAL_ASKED = 'approval/asked'
@@ -75,9 +81,45 @@ function keyOf(...parts) {
   return key.length <= MAX_EVENT_KEY ? key : autoKey(...parts)
 }
 
+/**
+ * The assistant's own sentence from a DSH `AssistantMessage`.
+ *
+ * `content` interleaves text, reasoning and tool calls (dsh-llm `ContentBlock`). Only `text`
+ * blocks are prose addressed to the reader. A reasoning block is thinking, not a checkpoint.
+ */
+export function assistantText(message) {
+  if (!message || message.role !== 'assistant' || !Array.isArray(message.content)) return ''
+  return message.content
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n')
+    .trim()
+}
+
+/**
+ * Whether the same assistant message requested a tool.
+ *
+ * This is what makes the checkpoint rule need no pending state: DSH puts the prose and the
+ * tool-call blocks in one event. A message with tools was commentary; one without is the
+ * answer, and the turn boundary closes it (design.md §37).
+ */
+export function hasToolCall(message) {
+  if (!message || !Array.isArray(message.content)) return false
+  return message.content.some((block) => block?.type === 'tool-call')
+}
+
+/** One line for a whole-list todo snapshot: progress plus the item being worked now. */
+function planLine(todos) {
+  const total = todos.length
+  const done = todos.filter((todo) => todo.status === 'completed').length
+  const active = todos.find((todo) => todo.status === 'in_progress')
+  return active
+    ? `Plan ${done}/${total} · ${firstLine(active.title, 200)}`
+    : `Plan ${done}/${total} done`
+}
+
 /** Last path segment, for both separators: a DSH session may be described with either. */
-function projectName(cwd) {
-  const parts = String(cwd || '').split(/[\\/]+/).filter(Boolean)
+function projectName(cwd) {  const parts = String(cwd || '').split(/[\\/]+/).filter(Boolean)
   return cap(parts[parts.length - 1] || 'dsh', MAX_PROJECT)
 }
 
@@ -240,10 +282,56 @@ export function install(ctx, rawConfig = {}, deps = {}) {
     return state
   }
 
+  /**
+   * Publish where each live turn's session lives, for `cpctl task done|failed` to find.
+   *
+   * The agent's shell cannot see this plugin's process or environment. One file per DSH
+   * process under `~/.csd/state/sessions.d/` is the handoff; `cpctl` reads the newest entry
+   * matching the working directory. Removed when the last turn closes.
+   */
+  function sessionMapFile() {
+    const home = process.env.CSD_AGENT_HOME || join(homedir(), '.csd')
+    return join(home, 'state', 'sessions.d', `dsh-${process.pid}.json`)
+  }
+
+  function syncSessionMap() {
+    const byCwd = {}
+    for (const state of states.values()) {
+      const turn = state.current
+      if (!turn || turn.closed || !turn.csdId || !state.cwd) continue
+      if (!byCwd[state.cwd]) byCwd[state.cwd] = []
+      byCwd[state.cwd].push({
+        session_id: turn.csdId,
+        harness_id: state.id,
+        pid: process.pid,
+        started_at: turn.startedAt,
+      })
+    }
+    for (const entries of Object.values(byCwd)) {
+      entries.sort((a, b) => b.started_at - a.started_at)
+    }
+    try {
+      const file = sessionMapFile()
+      if (Object.keys(byCwd).length === 0) {
+        rmSync(file, { force: true })
+        return
+      }
+      mkdirSync(dirname(file), { recursive: true })
+      const tmp = `${file}.tmp`
+      writeFileSync(tmp, JSON.stringify({ writer: 'dsh', by_cwd: byCwd }, null, 2) + '\n', 'utf8')
+      renameSync(tmp, file)
+    } catch {
+      // Convenience for the agent's CLI, never a reason to disturb a turn.
+    }
+  }
+
   function newTurn(number) {
     return {
       number,
       csdId: null,
+      // Seconds, not milliseconds: the map is shared with the Python connectors, which use
+      // epoch seconds, and `cpctl` compares the newest entry across all of them.
+      startedAt: now() / 1000,
       title: '',
       appliedTitle: '',
       // Seq of this turn's first human message. `session/title` is derived from the whole
@@ -251,6 +339,13 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       firstPromptSeq: null,
       heartbeat: null,
       closed: false,
+      // Steps whose assistant message was already reported as a checkpoint. `step/end` uses
+      // this to stay silent: the prose is the checkpoint, and a "step N complete" line right
+      // after it is the same fact twice (design.md §37).
+      checkpointedSteps: new Set(),
+      // A `todo/write` in this turn makes the plan the progress track; `step/end` falls back to
+      // silence rather than narrating the same work in the machine's voice.
+      hasPlan: false,
     }
   }
 
@@ -291,6 +386,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       if (turn.title) turn.appliedTitle = turn.title
       info(`dsh-csd-reporter: turn ${turn.number} of ${state.id} -> ${turn.csdId}`)
       startHeartbeat(state, turn)
+      syncSessionMap()
       return true
     } catch (error) {
       // Leave csdId null: the next event on this turn tries again. A dashboard that was down
@@ -326,6 +422,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
     turn.heartbeat = null
     turn.closed = true
     if (state.current === turn) state.current = null
+    syncSessionMap()
   }
 
   async function startTurn(state, turn) {
@@ -347,8 +444,12 @@ export function install(ctx, rawConfig = {}, deps = {}) {
 
   async function reportStep(state, turn, data, event) {
     if (turn.closed) return
-    if (!(await ensureSession(state, turn))) return
+    // A checkpoint anywhere in this turn — prose or a plan snapshot — is the progress track.
+    // `step/end` is the fallback for a turn that has neither, not a parallel commentary track
+    // in the machine's voice (design.md §37).
+    if (turn.hasPlan || turn.checkpointedSteps.size > 0) return
     const step = Number(data?.step)
+    if (!(await ensureSession(state, turn))) return
     const message = Number.isFinite(step) ? `step ${step} complete` : 'step complete'
     await client.reportEvent(turn.csdId, {
       event_type: 'progress',
@@ -357,6 +458,68 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       occurred_at: isoTime(event, now),
       payload: { turn: turn.number, ...(Number.isFinite(step) ? { step } : {}) },
     })
+  }
+
+  /**
+   * Report an assistant message as a checkpoint.
+   *
+   * Called only when the same message also requested a tool (commentary), or when DSH marked
+   * it `interrupted` (a delivered prefix that never became an answer). The agent's own
+   * `message.id` is the idempotency key; the text is never the key.
+   */
+  async function reportCheckpoint(state, turn, data, event) {
+    if (turn.closed) return
+    const message = data?.message
+    const text = assistantText(message)
+    if (!text) return
+    if (!hasToolCall(message) && data?.interrupted !== true) return
+    if (!(await ensureSession(state, turn))) return
+    const step = Number(data?.step)
+    await client.reportEvent(turn.csdId, {
+      event_type: 'checkpoint',
+      message: cap(firstLine(text, MAX_MESSAGE), MAX_MESSAGE),
+      event_key: keyOf('dsh', state.id, turn.number, 'message', message?.id ?? event.seq),
+      occurred_at: isoTime(event, now),
+      payload: {
+        source: 'prose',
+        turn: turn.number,
+        ...(message?.id ? { message_id: message.id } : {}),
+        ...(data?.interrupted === true ? { interrupted: true } : {}),
+      },
+    })
+    if (Number.isFinite(step)) turn.checkpointedSteps.add(step)
+  }
+
+  /**
+   * Report a `todo/write` whole-list snapshot as a plan checkpoint.
+   *
+   * DSH's todo list is already the agent's own plan; the event is a full replacement, so the
+   * payload is too. Latest write wins, which is why the idempotency key is the event's `seq`
+   * rather than anything derived from the contents.
+   */
+  async function reportPlan(state, turn, data, event) {
+    if (turn.closed) return
+    const todos = Array.isArray(data?.todos) ? data.todos : []
+    const plan = todos
+      .slice(0, 50)
+      .map((todo) => ({
+        title: cap(typeof todo?.content === 'string' ? todo.content : '', 200),
+        status:
+          todo?.status === 'completed' || todo?.status === 'in_progress'
+            ? todo.status
+            : 'pending',
+      }))
+      .filter((item) => item.title)
+    if (!plan.length) return
+    if (!(await ensureSession(state, turn))) return
+    await client.reportEvent(turn.csdId, {
+      event_type: 'checkpoint',
+      message: cap(planLine(plan), MAX_MESSAGE),
+      event_key: keyOf('dsh', state.id, turn.number, 'plan', event.seq),
+      occurred_at: isoTime(event, now),
+      payload: { source: 'plan', turn: turn.number, plan },
+    })
+    turn.hasPlan = true
   }
 
   async function reportApproval(state, turn, data, event) {
@@ -508,6 +671,16 @@ export function install(ctx, rawConfig = {}, deps = {}) {
         if (turn) enqueue(state, () => reportStep(state, turn, event.data, event))
         break
       }
+      case ASSISTANT_MESSAGE: {
+        const turn = state.current
+        if (turn) enqueue(state, () => reportCheckpoint(state, turn, event.data, event))
+        break
+      }
+      case TODO_WRITE: {
+        const turn = state.current
+        if (turn) enqueue(state, () => reportPlan(state, turn, event.data, event))
+        break
+      }
       case APPROVAL_ASKED: {
         const turn = state.current
         if (turn) enqueue(state, () => reportApproval(state, turn, event.data, event))
@@ -606,6 +779,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       ),
     )
     states.clear()
+    syncSessionMap()
   }
 
   if (typeof ctx?.effect === 'function') {
