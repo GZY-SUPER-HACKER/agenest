@@ -30,7 +30,7 @@ from pathlib import Path
 
 from . import runtime, tracked
 from . import host as host_report
-from .hooks import _first_line, _host_label, _log, _now
+from .hooks import _first_line, _host_label, _is_system_message, _log, _now
 
 #: The dashboard's `MAX_MESSAGE`. A summary line is capped here so a long prompt cannot make
 #: the event a 422.
@@ -117,13 +117,19 @@ def on_user_prompt(payload: dict) -> None:
     entry = _entry_for(payload)
     if entry is None:
         return
-    title = _first_line(payload.get("prompt") or "")
-    if not title:
+    prompt = payload.get("prompt") or ""
+    if not prompt.strip():
         return
-    runtime.cpctl("session", "update", "--session", entry.csd_session_id,
-                  "--title", title)
+    # Same rule as Claude Code's `UserPromptSubmit`: a harness-injected message is not the user
+    # naming the work. The turn still advances so the following boundary keeps its own key.
+    title = "" if _is_system_message(prompt) else _first_line(prompt)
+    if title:
+        runtime.cpctl("session", "update", "--session", entry.csd_session_id,
+                      "--title", title)
     entry.turn += 1
     tracked.put(entry)
+    if not title:
+        return
     key = _key("codex-prompt", entry.csd_session_id, payload.get("turn_id"), entry.turn)
     result = runtime.cpctl("event", "--session", entry.csd_session_id,
                            "--type", "progress",

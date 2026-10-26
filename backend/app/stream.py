@@ -48,7 +48,9 @@ def session_frame(session: SessionOut) -> dict:
     list hook replaces its copy of a session with this object, so a field omitted here is a
     field erased from the screen — which is how a card's "what it is doing" line used to
     vanish on the frame that arrived alongside every event. `last_event` in particular is
-    load-bearing: it is what distinguishes a session blocked on the user from a busy one.
+    load-bearing: it is what distinguishes a session blocked on the user from a busy one,
+    and `last_verdict` is what keeps a task verdict visible after the turn boundary that
+    follows it.
     """
     return {
         "kind": "session.updated",
@@ -72,6 +74,11 @@ def session_frame(session: SessionOut) -> dict:
             "last_event": (
                 session.last_event.model_dump(mode="json")
                 if session.last_event is not None
+                else None
+            ),
+            "last_verdict": (
+                session.last_verdict.model_dump(mode="json")
+                if session.last_verdict is not None
                 else None
             ),
         },

@@ -106,10 +106,15 @@ def load() -> dict[str, Tracked]:
     return out
 
 
-def _save(entries: dict[str, Tracked]) -> None:
-    path = config.tracked_file()
+def _session_map_file() -> Path:
+    # Derived from `tracked_file()`'s directory rather than `state_dir()` directly, so a test
+    # (or an operator) that redirects the tracked file redirects the map with it — one state
+    # root, not two that can disagree.
+    return config.tracked_file().parent / "sessions.d" / "csd-agent.json"
+
+
+def _atomic_write(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {key: entry.to_dict() for key, entry in entries.items()}
     # A **unique** temporary name, because hooks do run concurrently: closing one VS Code
     # window fires a `SessionEnd` per open session in the same second, and a fixed
     # `tracked.json.tmp` had one process rename the file the other was about to write —
@@ -133,6 +138,43 @@ def _save(entries: dict[str, Tracked]) -> None:
             tmp.unlink()
         except OSError:
             pass
+
+
+def _write_session_map(entries: dict[str, "Tracked"]) -> None:
+    """Publish where each live session lives, for `cpctl task done|failed` to find.
+
+    The agent runs `cpctl` from its own shell, which cannot see a hook's process or its
+    environment. A small file keyed by working directory is the handoff: the agent is in the
+    project directory, and so is the session. One writer owns one file, so the Pi/DSH/nanobot
+    reporters never contend with this one.
+    """
+    by_cwd: dict[str, list[dict]] = {}
+    for entry in entries.values():
+        if not entry.cwd or not entry.csd_session_id:
+            continue
+        by_cwd.setdefault(entry.cwd, []).append(
+            {
+                "session_id": entry.csd_session_id,
+                "harness_id": entry.cc_session_id,
+                "pid": entry.pid,
+                "started_at": entry.started_at,
+            }
+        )
+    for values in by_cwd.values():
+        values.sort(key=lambda value: value["started_at"], reverse=True)
+    try:
+        _atomic_write(_session_map_file(), {"writer": "csd-agent", "by_cwd": by_cwd})
+    except OSError:
+        # The map is a convenience for the agent's own CLI. Losing it costs one explicit
+        # `--session`; failing the hook that called us would cost the user's session.
+        pass
+
+
+def _save(entries: dict[str, Tracked]) -> None:
+    path = config.tracked_file()
+    payload = {key: entry.to_dict() for key, entry in entries.items()}
+    _atomic_write(path, payload)
+    _write_session_map(entries)
 
 
 def put(entry: Tracked) -> None:

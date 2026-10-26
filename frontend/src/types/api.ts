@@ -21,6 +21,8 @@ export type EventType =
   | "awaiting_user"
   | "turn_completed"
   | "checkpoint"
+  | "task_failed"
+  | "task_completed"
   | "session_completed"
   | "session_failed"
   | "session_interrupted"
@@ -62,6 +64,13 @@ export interface Session {
    * fetching it. `null` for a session that has only ever reported a heartbeat.
    */
   last_event: SessionEvent | null;
+  /**
+   * The newest task verdict (`task_failed` / `task_completed`), projected separately from
+   * `last_event`. An agent reports its verdict at the end of a turn, and the `turn_completed`
+   * that follows would otherwise hide it. Whether it still describes the current work is a
+   * display decision — see `isTaskFailed` in `lib/format.ts`.
+   */
+  last_verdict: SessionEvent | null;
 }
 
 export interface SessionDetail extends Session {

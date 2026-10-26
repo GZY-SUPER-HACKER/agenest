@@ -29,6 +29,8 @@ import {
   isAwaitingUser,
   isBusy,
   isIdle,
+  isTaskCompleted,
+  isTaskFailed,
   relativeTime,
   statusLabel,
 } from "../lib/format";
@@ -74,8 +76,15 @@ export function DetailPage({
     stopped working, and "maybe offline" is only an inference from it being quiet afterwards.
   */
   const idle = isIdle(detail);
+  /*
+    The work failed while the run may have ended cleanly. It outranks staleness for the same
+    reason waiting does: a report beats an inference drawn from the quiet that followed it.
+  */
+  const taskFailed = isTaskFailed(detail);
+  const taskCompleted = isTaskCompleted(detail);
   // Waiting beats stale, for the same reason as on the card: a report outranks an inference.
-  const stale = detail.possibly_stale && isBusy(detail) && !awaiting && !idle;
+  const stale =
+    detail.possibly_stale && isBusy(detail) && !awaiting && !idle && !taskFailed;
 
   return (
     <article className="detail">
@@ -108,6 +117,30 @@ export function DetailPage({
           <span>
             Waiting on you. The newest event below is a request, not progress — nothing moves
             until it is answered.
+          </span>
+        </div>
+      )}
+
+      {taskFailed && (
+        /*
+          The pill above says how the *run* ended (`completed` is the ordinary case — a
+          verifier runs after the agent exits). This is the other fact, reported separately
+          so that neither has to be inferred from the other. docs/design.md §40.
+        */
+        <div className="notice notice--bad" role="status">
+          <span>
+            The task failed. A verifier reported that the work did not pass — the status above
+            describes how the agent's run ended, not whether the task succeeded.
+          </span>
+        </div>
+      )}
+
+      {taskCompleted && (
+        /* The positive half of the same report. Quiet, because it asks nothing of you. */
+        <div className="notice notice--quiet" role="status">
+          <span>
+            The agent reported this task as done. That is its own claim; a verifier, when one
+            runs, reports separately.
           </span>
         </div>
       )}

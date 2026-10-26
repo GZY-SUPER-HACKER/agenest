@@ -9,6 +9,7 @@ server (docs/design.md §35). Dropping it on the failure path is how one PATCH t
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from pathlib import Path
@@ -33,11 +34,37 @@ def entry() -> tracked.Tracked:
 
 
 @pytest.fixture(autouse=True)
-def quiet_log(monkeypatch):
-    """Keep `hook.log` out of the developer's real `~/.csd` while these tests run."""
+def quiet_log(monkeypatch, tmp_path):
+    """Keep `hook.log` and the session state out of the developer's real `~/.csd`."""
     lines: list[str] = []
     monkeypatch.setattr(hooks, "_log", lines.append)
+    # Several handlers write the tracked entry for real; without this the fixture entry
+    # `cc-1` lands in the machine's actual connector state (and in the map `cpctl task` reads).
+    monkeypatch.setattr(tracked.config, "tracked_file", lambda: tmp_path / "state" / "tracked.json")
     return lines
+
+
+def test_tracked_put_publishes_the_session_for_cpctl(tmp_path, monkeypatch) -> None:
+    """The agent's `cpctl task` needs a path from its working directory to the session id.
+
+    The connector runs in a process the agent cannot see, and Pi/DSH do the same thing in
+    their own files; this is the csd-agent half of that convention.
+    """
+    path = tmp_path / "state" / "tracked.json"
+    monkeypatch.setattr(tracked.config, "tracked_file", lambda: path)
+
+    tracked.put(entry())
+
+    map_path = path.parent / "sessions.d" / "csd-agent.json"
+    data = json.loads(map_path.read_text(encoding="utf-8"))
+    published = data["by_cwd"]["/work"][0]
+    assert published["session_id"] == "s_abc"
+    assert published["harness_id"] == "cc-1"
+
+    tracked.drop("cc-1")
+
+    data = json.loads(map_path.read_text(encoding="utf-8"))
+    assert data["by_cwd"] == {}
 
 
 def test_a_failed_session_end_keeps_the_entry_tracked(quiet_log, monkeypatch) -> None:
@@ -113,6 +140,36 @@ def test_a_prompt_reports_progress_and_bumps_the_turn(monkeypatch) -> None:
     assert event_call[event_call.index("--type") + 1] == "progress"
     assert "Turn 1: fix the tests" in event_call
     assert stored and stored[0].turn == 1
+
+
+def test_a_system_message_never_becomes_the_session_title(monkeypatch) -> None:
+    """`<task-notification>` arrives on `UserPromptSubmit`, but the user did not write it.
+
+    Naming the session from every payload is how the deployed dashboard ended up with rows
+    called `<task-notification>`. The turn still advances: `Stop` keys its boundary on the
+    number, so reusing the previous one would deduplicate the boundary away.
+    """
+    calls: list[tuple[str, ...]] = []
+    stored: list[tracked.Tracked] = []
+    current = entry()
+    current.turn = 2
+    monkeypatch.setattr(tracked, "get", lambda cc_id: current if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="ok\n"))[1],
+    )
+
+    hooks.on_user_prompt({
+        "session_id": "cc-1",
+        "prompt": "<task-notification>\n<task-id>abc</task-id>\n</task-notification>",
+    })
+
+    assert calls == [], "no title update and no 'Turn N:' line for a system message"
+    assert stored[-1].turn == 3
+    # The tag decides, not the words: a prompt that merely mentions one is still a prompt.
+    assert hooks._is_system_message("explain <task-notification>") is False
 
 
 def pending_entry() -> tracked.Tracked:

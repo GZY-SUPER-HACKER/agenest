@@ -37,9 +37,9 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, hostname as osHostname } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** How `csd-agent` recognises its own file. Never delete a file that does not carry it. */
 export const MARKER = 'csd-pi-reporter'
@@ -481,6 +481,66 @@ export function install(pi, deps = {}) {
     return next
   }
 
+  /**
+   * Publish where this run's session lives, for `cpctl task done|failed` to find.
+   *
+   * The agent's shell cannot see this extension's process or environment, and Pi gives it no
+   * session id to pass. A per-process file under `~/.csd/state/sessions.d/` is the handoff:
+   * `cpctl` reads the newest entry matching the working directory. Per-process means two Pi
+   * processes never write the same file. Removed when the run closes; a crash leaves a stale
+   * entry, which only matters if no newer run exists in that directory.
+   */
+  function sessionMapFile() {
+    const home = process.env.CSD_AGENT_HOME || join(homedir(), '.csd')
+    return join(home, 'state', 'sessions.d', `pi-${process.pid}.json`)
+  }
+
+  function writeSessionMap(run) {
+    if (!run?.csdId || !run.cwd) return
+    try {
+      const file = sessionMapFile()
+      mkdirSync(dirname(file), { recursive: true })
+      const payload = {
+        writer: 'pi',
+        by_cwd: {
+          [run.cwd]: [{
+            session_id: run.csdId,
+            harness_id: run.id,
+            pid: process.pid,
+            started_at: run.startedAt,
+          }],
+        },
+      }
+      const tmp = `${file}.tmp`
+      writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf8')
+      renameSync(tmp, file)
+    } catch {
+      // Convenience for the agent's CLI, never a reason to disturb the run.
+    }
+  }
+
+  function clearSessionMap(run = null) {
+    const file = sessionMapFile()
+    try {
+      // A new run may already have overwritten the file (session_start closes the leftover
+      // and opens the next one in the same tick). Removing it then would delete the *new*
+      // run's entry, so only remove what still names this run.
+      if (run) {
+        // A run that never got a session never wrote an entry; removing the file would only
+        // touch somebody else's.
+        if (!run.csdId) return
+        const data = JSON.parse(readFileSync(file, 'utf8'))
+        const ids = Object.values(data?.by_cwd ?? {})
+          .flat()
+          .map((entry) => entry?.session_id)
+        if (!ids.includes(run.csdId)) return
+      }
+      rmSync(file, { force: true })
+    } catch {
+      // Nothing to do: a stale file is ignored in favour of a newer run in the same directory.
+    }
+  }
+
   function openRun(event, ctx) {
     const cwd = typeof ctx?.cwd === 'string' && ctx.cwd ? ctx.cwd : lastCwd
     const run = {
@@ -489,6 +549,9 @@ export function install(pi, deps = {}) {
       project: projectName(cwd),
       title: cap(firstLine(event?.prompt, 68) || `Pi · ${projectName(cwd)}`, MAX_TITLE),
       csdId: null,
+      // Seconds, not milliseconds: the map is shared with the Python connectors, which use
+      // epoch seconds, and `cpctl` compares the newest entry across all of them.
+      startedAt: now() / 1000,
       stopReason: null,
       errorMessage: null,
       heartbeat: null,
@@ -521,6 +584,7 @@ export function install(pi, deps = {}) {
       const session = await client.createSession(body)
       run.csdId = session?.id ?? null
       if (!run.csdId) throw new Error('the dashboard returned no session id')
+      writeSessionMap(run)
       info(`pi-csd-reporter: run ${run.id} -> ${run.csdId}`)
       startHeartbeat(run)
       return true
@@ -610,6 +674,7 @@ export function install(pi, deps = {}) {
     if (run.closed) return
     run.closed = true
     if (current === run) current = null
+    clearSessionMap(run)
     if (!run.csdId) {
       // A run that never got a session is dropped rather than retried here: the next prompt will
       // create a fresh one, and a late `PATCH` would be more confusing than the gap.
@@ -728,6 +793,7 @@ export function install(pi, deps = {}) {
       await settleBriefly([enqueue(run, () => closeRun(run, 'interrupted', 'Pi exited before the run settled'))])
     }
     current = null
+    clearSessionMap(run)
   }
 
   return handle

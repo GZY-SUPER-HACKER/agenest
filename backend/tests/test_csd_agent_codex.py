@@ -188,6 +188,26 @@ def test_prompt_and_stop_are_the_turn_vocabulary(monkeypatch, calls: FakeCalls) 
     assert "turn-7" in boundary[boundary.index("--key") + 1]
 
 
+def test_a_system_message_does_not_name_the_codex_session(
+    monkeypatch, calls: FakeCalls
+) -> None:
+    """A background task notification is a user-role message, not the user naming the work."""
+    current = entry()
+    current.turn = 2
+    monkeypatch.setattr(codex_hooks.tracked, "get", lambda _sid: current)
+    monkeypatch.setattr(codex_hooks.tracked, "put", lambda _entry: None)
+
+    codex_hooks.run(raw=json.dumps({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "codex-1",
+        "prompt": "<task-notification>build finished</task-notification>",
+        "turn_id": "turn-8",
+    }))
+
+    assert calls.calls == []
+    assert current.turn == 3
+
+
 def test_permission_request_reports_but_returns_no_decision(
     monkeypatch, calls: FakeCalls, capsys
 ) -> None:

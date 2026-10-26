@@ -36,6 +36,11 @@ export function eventKind(type: EventType): EventKind {
       return "turn";
     case "checkpoint":
       return "checkpoint";
+    case "task_failed":
+      // Same red as a failed session in the timeline: it is an outcome, not punctuation.
+      return "failed";
+    case "task_completed":
+      return "completed";
     default:
       return "progress";
   }
@@ -61,6 +66,11 @@ export const STATUS_LABEL: Record<SessionStatus, string> = {
  */
 export function doingLine(session: Session): string {
   if (session.status === "failed" && session.summary) return session.summary;
+  // A verdict describes the last finished task and is more useful than the turn boundary that
+  // followed it ("the reply ended"). Only a verdict that still describes the current work is
+  // shown — see `visibleVerdict`.
+  const verdict = visibleVerdict(session);
+  if (verdict) return verdict.message;
   if (session.last_event) return session.last_event.message;
   if (session.summary) return session.summary;
   if (session.status === "running") return "no activity reported yet";
@@ -110,6 +120,47 @@ export function isIdle(session: Session): boolean {
   return (
     session.status === "running" && session.last_event?.event_type === "turn_completed"
   );
+}
+
+/**
+ * The task verdict that still describes the current work, if any.
+ *
+ * Read off `last_verdict`, **not** `last_event`: an agent reports its verdict at the end of a
+ * turn, and the `turn_completed` (or a trailing checkpoint) that follows would hide it if it
+ * shared `last_event`. Keeping the projection separate is what makes "completed run, failed
+ * task" visible at all (docs/design.md §40).
+ *
+ * It stops describing the current work once work resumes. A running session with a newer
+ * `progress`/`checkpoint` is on a new task, so the old verdict is not shown; `turn_completed`
+ * (idle), `awaiting_user` and `note` are not work and do not clear it. A closed session keeps
+ * its last verdict — there is nothing after it to contradict it.
+ */
+function visibleVerdict(session: Session): Session["last_verdict"] {
+  const verdict = session.last_verdict;
+  if (!verdict) return null;
+  if (!isBusy(session) || isIdle(session)) return verdict;
+
+  const event = session.last_event;
+  if (!event) return verdict;
+  if (event.id <= verdict.id) return verdict;
+  if (
+    event.event_type === "turn_completed" ||
+    event.event_type === "awaiting_user" ||
+    event.event_type === "note"
+  ) {
+    return verdict;
+  }
+  return null;
+}
+
+/** Did the *work* fail, while the run itself may have ended fine? */
+export function isTaskFailed(session: Session): boolean {
+  return visibleVerdict(session)?.event_type === "task_failed";
+}
+
+/** Did the agent report that the work succeeded? */
+export function isTaskCompleted(session: Session): boolean {
+  return visibleVerdict(session)?.event_type === "task_completed";
 }
 
 /** The status a person should read. `idle` is a reported display state, not a status. */

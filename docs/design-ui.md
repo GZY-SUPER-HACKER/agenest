@@ -227,6 +227,19 @@ agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 没有 checkpoint 的 session 不显示任何占位。"这个 agent 没有中间报告"是诚实的，用工具名或耗时
 补一句话不是。
 
+`task_failed` / `task_completed` 是另一种事件行（docs/design.md §40）：进程可能干净退出，但
+校验或 agent 自己判定活成没成。
+
+- `task_failed` 圆点用实心 `--dead`，`task_completed` 用实心 `--ok`——它们是**结果**，不是在
+  干活；
+- 它们来自 session 的 `last_verdict`，而不是 `last_event`: agent 报完 verdict 后紧跟的
+  `turn_completed` 会把 `last_event` 顶掉。`last_verdict` 只要没有更新的 `progress` /
+  `checkpoint` 就仍然描述当前任务；`turn_completed`、`awaiting_user`、`note` 不算"又开始干活"；
+- `task_failed` **进入** needs-attention，而且**不看 status**：`completed` 一样进；
+  `task_completed` 不改变分组，只在卡片上给一个安静的 "task done"；
+- 分区时 task-failed 从 running / idle / finished 里扣掉，保证 tile 仍然精确相加；
+- 状态胶囊不变：它说的是**进程怎么结束的**，verdict 说的是**活成没成**，两个事实都保留。
+
 ## 附件：卡片，不是链接
 
 文件在对话里是**卡片**，不是一行带下划线的链接。卡片把三个问题一次答完：这是什么（名字 +

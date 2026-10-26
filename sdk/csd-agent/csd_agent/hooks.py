@@ -99,6 +99,17 @@ MAX_TITLE = 68
 #: message does not grow `tracked.json` between hook processes.
 MAX_CHECKPOINT = 500
 
+#: Tags that mark a message the harness injected into the conversation rather than one the user
+#: typed. They arrive on `UserPromptSubmit` too — a finished background task is delivered as a
+#: user-role message — so naming a session from every payload produced rows called
+#: `<task-notification>` on the deployed dashboard (docs/design.md §39).
+SYSTEM_MESSAGE_TAGS = (
+    "<task-notification>",
+    "<system-reminder>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+)
+
 
 def _log(message: str) -> None:
     """Append to the agent's log. Best-effort — a log write must not fail a hook."""
@@ -128,6 +139,15 @@ def _first_line(text: str, limit: int = MAX_TITLE) -> str:
             # that drops the whole report.
             return line[: max(1, limit - 1)].rstrip() + "…"
     return ""
+
+
+def _is_system_message(text: str) -> bool:
+    """Is this the harness talking, rather than the person at the keyboard?
+
+    The test is the tag the harness writes, not the words in the payload: guessing from the
+    content would silently drop a prompt that merely mentions a notification.
+    """
+    return text.lstrip().startswith(SYSTEM_MESSAGE_TAGS)
 
 
 # --------------------------------------------------------------------------- #
@@ -218,13 +238,19 @@ def on_user_prompt(payload: dict) -> None:
     entry = _entry_for(payload)
     if entry is None:
         return
-    title = _first_line(payload.get("prompt") or "")
-    if not title:
+    prompt = payload.get("prompt") or ""
+    if not prompt.strip():
         return
-    result = runtime.cpctl("session", "update", "--session", entry.csd_session_id,
-                           "--title", title)
-    _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
-         else f"UserPromptSubmit: cpctl failed: {result.detail}")
+    # A message the harness injected is not the user naming their work, so it never becomes the
+    # title. It still opens a model turn, and the counter has to move: `Stop` keys its boundary
+    # on the turn number, so reusing the previous one would deduplicate the boundary away and
+    # leave the page showing the state of a turn that has already ended.
+    title = "" if _is_system_message(prompt) else _first_line(prompt)
+    if title:
+        result = runtime.cpctl("session", "update", "--session", entry.csd_session_id,
+                               "--title", title)
+        _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
+             else f"UserPromptSubmit: cpctl failed: {result.detail}")
 
     # The prompt is the only thing that says "the agent is now working on X": `SessionStart`
     # fired hours ago, and `Stop` only says the turn is over. Without this the timeline of a
@@ -236,6 +262,8 @@ def on_user_prompt(payload: dict) -> None:
     # carrying it forward would attribute an old sentence to the new work.
     _clear_pending(entry)
     tracked.put(entry)
+    if not title:
+        return
     progress = runtime.cpctl("event", "--session", entry.csd_session_id,
                              "--type", "progress",
                              "-m", f"Turn {entry.turn}: {title}")

@@ -33,6 +33,10 @@
  * child and make the rail read as more work than happened.
  */
 
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+
 import { resolveConfig } from './config.js'
 import { autoKey, firstLine, ReportClient, titleFromContent, turnOutcome } from './reporter.js'
 
@@ -278,10 +282,56 @@ export function install(ctx, rawConfig = {}, deps = {}) {
     return state
   }
 
+  /**
+   * Publish where each live turn's session lives, for `cpctl task done|failed` to find.
+   *
+   * The agent's shell cannot see this plugin's process or environment. One file per DSH
+   * process under `~/.csd/state/sessions.d/` is the handoff; `cpctl` reads the newest entry
+   * matching the working directory. Removed when the last turn closes.
+   */
+  function sessionMapFile() {
+    const home = process.env.CSD_AGENT_HOME || join(homedir(), '.csd')
+    return join(home, 'state', 'sessions.d', `dsh-${process.pid}.json`)
+  }
+
+  function syncSessionMap() {
+    const byCwd = {}
+    for (const state of states.values()) {
+      const turn = state.current
+      if (!turn || turn.closed || !turn.csdId || !state.cwd) continue
+      if (!byCwd[state.cwd]) byCwd[state.cwd] = []
+      byCwd[state.cwd].push({
+        session_id: turn.csdId,
+        harness_id: state.id,
+        pid: process.pid,
+        started_at: turn.startedAt,
+      })
+    }
+    for (const entries of Object.values(byCwd)) {
+      entries.sort((a, b) => b.started_at - a.started_at)
+    }
+    try {
+      const file = sessionMapFile()
+      if (Object.keys(byCwd).length === 0) {
+        rmSync(file, { force: true })
+        return
+      }
+      mkdirSync(dirname(file), { recursive: true })
+      const tmp = `${file}.tmp`
+      writeFileSync(tmp, JSON.stringify({ writer: 'dsh', by_cwd: byCwd }, null, 2) + '\n', 'utf8')
+      renameSync(tmp, file)
+    } catch {
+      // Convenience for the agent's CLI, never a reason to disturb a turn.
+    }
+  }
+
   function newTurn(number) {
     return {
       number,
       csdId: null,
+      // Seconds, not milliseconds: the map is shared with the Python connectors, which use
+      // epoch seconds, and `cpctl` compares the newest entry across all of them.
+      startedAt: now() / 1000,
       title: '',
       appliedTitle: '',
       // Seq of this turn's first human message. `session/title` is derived from the whole
@@ -336,6 +386,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       if (turn.title) turn.appliedTitle = turn.title
       info(`dsh-csd-reporter: turn ${turn.number} of ${state.id} -> ${turn.csdId}`)
       startHeartbeat(state, turn)
+      syncSessionMap()
       return true
     } catch (error) {
       // Leave csdId null: the next event on this turn tries again. A dashboard that was down
@@ -371,6 +422,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
     turn.heartbeat = null
     turn.closed = true
     if (state.current === turn) state.current = null
+    syncSessionMap()
   }
 
   async function startTurn(state, turn) {
@@ -727,6 +779,7 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       ),
     )
     states.clear()
+    syncSessionMap()
   }
 
   if (typeof ctx?.effect === 'function') {

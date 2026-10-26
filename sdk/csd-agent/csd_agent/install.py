@@ -133,6 +133,7 @@ finally:
 #: inside `runtime.environment()`, exactly as they do for a hook.
 HEARTBEAT_LAUNCHER = '''\
 """Run one CSD heartbeat with no console window. Written by `csd-agent install`."""
+import contextlib
 import os
 import sys
 import traceback
@@ -144,7 +145,13 @@ sys.path.insert(0, str(home / "csd-agent"))
 
 try:
     from csd_agent.cli import main
-    code = main(["heartbeat"])
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    # stdout goes to the log rather than nowhere: a repair of `settings.json` is a state
+    # change the user did not ask for, and it has to be findable afterwards. A quiet run
+    # prints nothing, so the file only grows when there is something to say.
+    with (home / "state" / "heartbeat.log").open("a", encoding="utf-8") as handle:
+        with contextlib.redirect_stdout(handle), contextlib.redirect_stderr(handle):
+            code = main(["heartbeat"])
 except Exception:
     # A scheduled task has no terminal and no journal. Without this file a crash is silent,
     # and "the host went stale" is the only symptom anyone would ever see.
@@ -414,6 +421,10 @@ class Installer:
                  "-o", "StrictHostKeyChecking=accept-new",
                  remote, command],
                 capture_output=True, text=True, timeout=30,
+                # The remote's bytes are UTF-8; `text=True` alone decodes with the Windows
+                # locale (GBK here), and one non-ASCII byte in ssh's stderr turns a successful
+                # fetch into a traceback from the reader thread.
+                encoding="utf-8", errors="replace",
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""
@@ -697,55 +708,11 @@ class Installer:
         A merge rather than a write, because this file is the user's: it already holds their
         statusline, their permissions, and their own hooks. On the dev machine it is also
         rewritten wholesale by a config manager on every launch — which is why re-running
-        install is the supported way to recover, and why the hardening here is "identify our
-        own entries by a marker and replace only those" rather than "compare and skip".
+        install is the supported way to recover, why the hardening here is "identify our own
+        entries by a marker and replace only those", and why `repair_hooks` exists for the
+        case nobody re-runs install.
         """
-        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-        if SETTINGS.exists():
-            backup = SETTINGS.with_suffix(".json.bak-csd-agent")
-            shutil.copy2(SETTINGS, backup)
-            self.note(f"backed up {SETTINGS.name} -> {backup.name}")
-            try:
-                data = json.loads(SETTINGS.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                self.note(f"ERROR: {SETTINGS} is not valid JSON ({exc}); not touching it")
-                return
-        else:
-            data = {}
-
-        if not isinstance(data, dict):
-            self.note(f"ERROR: {SETTINGS} is not a JSON object; not touching it")
-            return
-
-        hooks = data.get("hooks")
-        if not isinstance(hooks, dict):
-            hooks = {}
-
-        added = []
-        for event in HOOK_EVENTS:
-            groups = hooks.get(event)
-            groups = groups if isinstance(groups, list) else []
-
-            # Drop any earlier entry of ours, keep everyone else's verbatim.
-            kept = [
-                group for group in groups
-                if not _is_ours(group)
-            ]
-            kept.append({
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": _hook_command(event),
-                    "timeout": HOOK_TIMEOUT,
-                }],
-            })
-            hooks[event] = kept
-            added.append(event)
-
-        data["hooks"] = hooks
-        SETTINGS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                            encoding="utf-8")
-        self.note(f"hooks merged: {', '.join(added)}")
+        merge_hooks(SETTINGS, note=self.note)
 
     # ------------------------------------------------------------------ #
     def _install_codex(self) -> None:
@@ -1083,6 +1050,126 @@ def _is_ours(group: object) -> bool:
         if marker in command:
             return True
     return False
+
+
+def merge_hooks(settings: Path | None = None, *, note=None) -> bool:
+    """Merge this connector's hook entries into `settings.json`, touching nothing else.
+
+    Shared by `install` and by the heartbeat's `repair_hooks`, because the same file has two
+    writers with different semantics: this one merges by marker, and a config manager such as
+    cc-switch writes its own template over the whole document on every provider switch —
+    deleting every hook that template does not carry. Returns True when the file was written.
+    """
+    settings = settings or SETTINGS
+    say = note or (lambda _message: None)
+
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    if settings.exists():
+        backup = settings.with_suffix(".json.bak-csd-agent")
+        shutil.copy2(settings, backup)
+        say(f"backed up {settings.name} -> {backup.name}")
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            say(f"ERROR: {settings} is not valid JSON ({exc}); not touching it")
+            return False
+    else:
+        data = {}
+
+    if not isinstance(data, dict):
+        say(f"ERROR: {settings} is not a JSON object; not touching it")
+        return False
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+
+    added = []
+    for event in HOOK_EVENTS:
+        groups = hooks.get(event)
+        groups = groups if isinstance(groups, list) else []
+
+        # Drop any earlier entry of ours, keep everyone else's verbatim.
+        kept = [group for group in groups if not _is_ours(group)]
+        kept.append({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": _hook_command(event),
+                "timeout": HOOK_TIMEOUT,
+            }],
+        })
+        hooks[event] = kept
+        added.append(event)
+
+    data["hooks"] = hooks
+    _write_settings(settings, data)
+    say(f"hooks merged: {', '.join(added)}")
+    return True
+
+
+def repair_hooks(settings: Path | None = None, *, note=None) -> bool:
+    """Re-merge our entries when a settings-rewriting tool has removed them.
+
+    The heartbeat calls this on its timer. It is deliberately conservative: a missing file or
+    one that does not parse is left alone, because silently replacing a document we cannot
+    read is worse than a session that goes unreported until the next `install`. Returns True
+    when it actually rewrote the file.
+    """
+    settings = settings or SETTINGS
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if _hooks_present(data):
+        return False
+    return merge_hooks(settings, note=note)
+
+
+def _hooks_present(data: object) -> bool:
+    """Does the document still carry one of our entries for every event we wire?"""
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for event in HOOK_EVENTS:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            return False
+        if not any(_is_ours_for(group, event) for group in groups):
+            return False
+    return True
+
+
+def _is_ours_for(group: object, event: str) -> bool:
+    """`_is_ours`, narrowed to the group that runs this event's handler."""
+    if not _is_ours(group):
+        return False
+    return any(
+        isinstance(entry, dict) and event in str(entry.get("command", ""))
+        for entry in group.get("hooks", [])
+    )
+
+
+def _write_settings(path: Path, data: dict) -> None:
+    """Write atomically: the heartbeat may repair while Claude Code is reading the file."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _stop_windows_tunnel() -> None:

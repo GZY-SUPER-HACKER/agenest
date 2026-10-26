@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { install, openTurnOf } from '../lib/index.js'
 
 const QUIET = { warn() {}, info() {}, log() {} }
+// The plugin publishes `{cwd → session id}` under `$CSD_AGENT_HOME` for `cpctl task` to find.
+// Point it at a scratch directory so a test run never touches the real ~/.csd.
+process.env.CSD_AGENT_HOME = mkdtempSync(join(tmpdir(), 'csd-dsh-test-'))
 const CONFIG = {
   baseUrl: 'http://dashboard',
   token: 'test-token',

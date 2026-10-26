@@ -282,9 +282,9 @@ and first-write-wins, so every subsequent event would be silently discarded — 
 gap in the timeline, just a wall of "finished" sessions that are all still running.
 `SessionEnd` is the event that ends a session.
 
-This is written down because it is a harness-specific trap, not a general principle. The
-nanobot adapter (`csd_nanobot.py`) has the mirror-image hazard in its turn-level hooks, and
-the same rule — a per-turn signal is never a lifecycle signal — is what resolves both.
+This is written down because it is a harness-specific trap, not a general principle. Any
+reporter with a turn-level hook has the mirror-image hazard, and the same rule — a per-turn
+signal is never a lifecycle signal — resolves it.
 
 Reporting the boundary *as an event* is a different question, and §36 answers it.
 
@@ -2287,3 +2287,160 @@ already rejected that coupling for two other agents. Rejected: **auto-denying to
 `-p`".** `-p` is headless: it sets `approvalPolicy: "never"` and never receives the request.
 Auto-denying in a user-driven thread is not the same policy; it is a reporter overriding the
 human.
+
+
+## 39. A harness-injected message is not a prompt, so it never names a session
+
+`UserPromptSubmit` fires for more than the person typing. A finished background task is
+delivered as a user-role message wrapped in `<task-notification>`, and a context reminder
+arrives as `<system-reminder>`. The payload is shaped exactly like a prompt, so a reporter that
+named the session from every `UserPromptSubmit` produced rows called `<task-notification>` on
+the deployed dashboard: the name on the card was the harness's bookkeeping.
+
+The connector ignores a prompt whose first non-space character starts one of the harness's
+tags. It does not touch the title and does not report a `Turn N:` line — neither is a fact
+about what the user asked for. It **does** advance the turn counter, because the notification
+opens a real model turn and the following `Stop` keys its boundary on that number; reusing the
+previous one would deduplicate the boundary event away, and the page would keep showing the
+state of a turn that had already ended.
+
+Rejected: **filtering by content.** A prompt that merely mentions a notification is still a
+prompt, so the tag — not a guess from the words — decides. Rejected: **reporting a generic
+`Turn N: system message` line instead.** That is the same noise in a second place, and the
+status already says the session is open; the next real prompt names the work.
+
+---
+
+## 40. A task verdict is an event, and the harness cannot supply it
+
+`failed` used to carry two unrelated facts: *the agent's run failed* (an API error, a crash, a
+model error) and *the work failed* (the tests are red, the build is broken, the agent gave up).
+They are not the same thing, and one order of events makes the difference impossible to recover:
+an agent can run to completion, exit 0, and still have failed the task. For `claude -p` that is
+the ordinary case, and the dashboard used to file it under **Finished**.
+
+The split is between `status` and a **task verdict**. `status` keeps describing how the *run*
+ended — `completed` / `failed` / `interrupted` — and stays terminal, sticky and first-write-wins
+(§3). A verdict describes whether the *work* passed, and it is reported as an event:
+`task_failed` or `task_completed`.
+
+### The harness cannot decide it
+
+Every runtime vocabulary this project reads is a vocabulary of *runtime* outcomes:
+
+| runtime | what it reports | what it never reports |
+|---|---|---|
+| Claude Code `SessionEnd` | a clean exit, a crash, a logout | whether the task succeeded |
+| Codex `Stop` | `last_assistant_message` | whether the task succeeded |
+| Pi `stopReason` | `stop` / `toolUse` / `length` / `error` / `aborted` | whether the task succeeded |
+| DSH `turn/end.reason` | `completed` / `error` / `aborted` / `blocked` / `max-tokens` | whether the task succeeded |
+
+`error` in those vocabularies means the *agent* could not run. `stop` means it stopped. Neither
+is a verdict on the work. A reporter that turned a clean stop into "the task succeeded" would be
+§2's inference with a progress bar; one that turned it into "failed" would be the same
+inference wearing a red dot. So the verdict has to come from somewhere that actually knows:
+
+- **The agent itself.** It knows when the piece of work it was asked for is over, and it is the
+  party present in both launch paths — the user's interactive session and the personal agent's
+  remote `claude -p`. `csd-agent install` (or `csd-agent skill install` on its own) gives it a
+  stable launcher (`bash ~/.csd/bin/csd-cpctl task done|failed` — `bash` because the launcher is
+  a shell script and the agent's shell may be PowerShell) and a skill that says when to call
+  it. The claim is
+  recorded with `payload.source: "agent"`, so the page can say whose word it is. The current
+  generation of models is trusted to report its own outcome; this is a deliberate product call,
+  not an oversight.
+- **A verifier.** `run-agent.sh --verdict "pytest -q"` runs a command the caller supplied, after
+  a clean agent exit, and reports `task_failed` when it exits non-zero. Objective, harness-
+  agnostic, and no agent cooperation needed — the command is the source of truth. Its report
+  carries `source: "verifier"`.
+- **The orchestrator.** The personal agent that asked for the work knows whether the goal was
+  met and can report either event itself.
+
+### Reaching the session from the agent's shell
+
+The agent runs `cpctl` from its own shell, which has neither the ingest token nor the session id
+a connector holds. Two small pieces bridge that without a new credential:
+
+- `csd-agent skill install` writes a launcher that sets `CSD_AGENT_HOME`, `PYTHONPATH` and
+  sources `~/.csd/env`, so the agent's command is just `"$HOME/.csd/bin/csd-cpctl" task done -m
+  "…"`. The skill is the instruction; the launcher is the plumbing.
+- Each connector publishes `{cwd → live session id}` under `~/.csd/state/sessions.d/`, one file
+  per writer (`csd-agent.json`, `pi-<pid>.json`, `dsh-<pid>.json`, `nanobot-<pid>.json`). `cpctl`
+  reads them newest-first for its working directory. `run-agent.sh` instead exports
+  `CSD_SESSION_ID` into the agent's environment, which wins outright. No connector writes
+  another's file, so there is no shared lock and no cross-harness race.
+
+### Why an event, and not a status or a field
+
+- **The verdict usually arrives after the run has closed.** A verifier runs when the agent
+  exits, and `SessionEnd`/`Stop` have already closed the row. Terminal states are sticky (§3),
+  so a `PATCH` would be silently refused. Events are recorded on a closed session — they simply
+  cannot move its status — which is exactly the shape needed.
+- **It is not the newest *display* event, so it needs its own projection.** An agent reports its
+  verdict at the end of a turn, and `Stop` then reports `turn_completed`; a checkpoint may also
+  land. Reading the verdict off `last_event` would show it for a moment and then hide it behind
+  an event that says nothing about the task. The server therefore exposes `last_verdict` — the
+  newest `task_failed` / `task_completed` — beside `last_event`. The two answer different
+  questions and neither is recomputed from the other.
+- **`completed + task_failed` is a legitimate pair, not a contradiction.** The run ended
+  cleanly; the work did not pass. `completed + task_completed` is the positive form. A sixth
+  status could not express either pair, and would have made "how it ended" depend on "whether it
+  worked".
+
+Rejected: **a `failure_kind` column on `failed`.** It can only be written at close time, so it
+cannot carry a verdict that arrives afterwards; and it cannot represent a `completed` run that
+failed the task without also rewriting the status. Rejected: **inferring the verdict from the
+exit code.** An exit code says the *process* ended a certain way; `pytest` wrapped directly and
+`claude -p` both use non-zero, for two different meanings. It becomes a verdict only when the
+caller says which command is the verification. Rejected: **parsing the final message** for "I
+couldn't fix it". That is guessing from prose; the launcher call is an explicit declaration.
+
+### The rules that follow
+
+- `task_failed` and `task_completed` move **no** status and are in `NON_TERMINAL_EVENTS`.
+- `last_verdict` is part of the session contract and must be in `session_frame()`: the list hook
+  replaces a session wholesale, so a field omitted from the frame is a field erased from the
+  screen (the same rule as `last_event`).
+- The client shows the verdict while it still describes the current work: always on a closed
+  session; on a running one, only until a newer `progress` or `checkpoint` arrives.
+  `turn_completed`, `awaiting_user` and `note` do not clear it; a newer verdict replaces an older
+  one. Unlike `isAwaitingUser`, it is **not** gated on `running` — a completed run that failed
+  the task is exactly the case this exists for.
+- A task-failed session is counted under **needs attention** and removed from *running*, *idle*
+  and *finished*; a task-completed one keeps its normal bucket and only gains a quiet badge, so
+  the overview's tiles still partition the board (§ OverviewPage).
+- `run-agent.sh --verdict` reports `task_failed` (or `task_completed` when the verifier passes)
+  and closes the session `failed` when it is still open; a verifier cannot change the wrapper's
+  own exit status, which remains the agent's (§6).
+- The agent path is installed by `csd-agent install` (and refreshable with `csd-agent skill
+  install`): `cpctl task done|failed`. It is optional — without it, a session simply has no
+  verdict, and the page claims nothing.
+
+
+## 41. The shared settings file is repaired by the timer, not trusted to stay
+
+`~/.claude/settings.json` has two writers and no arbitration: `csd-agent install` merges its
+hook entries in by marker, while cc-switch writes a whole stored template over the document on
+every provider switch. Claude Code's rule is last-writer-wins, so a switch deletes every hook
+the template does not carry. Observed on the dev machine: the notification-sound hook survived
+because the template contains it, and all seven connector entries disappeared. The distinction
+was membership in the template, not "third-party".
+
+The heartbeat already runs every five minutes, so it is what checks. It parses the file, asks
+whether each of the seven events still has our entry, and re-merges only when one is missing.
+A missing or unparseable file is left alone: `install` reports those, and a timer silently
+replacing a document it cannot read is worse than a session that goes unreported. Writes are
+atomic (unique temp name, then `os.replace`) because Claude Code may be reading the file at
+that moment. `uninstall` deletes the scheduled task or timer before removing the entries, so
+the repair cannot fight a deliberate removal.
+
+The cost is one 4 KB read every five minutes. The limitation is a window: a session that
+starts between the rewrite and the next tick has already missed `SessionStart`, and no repair
+can reconstruct it.
+
+Rejected: **writing the entries into cc-switch's template.** It closes the window, but it makes
+another tool's private database a source of truth for our hooks, and every change to
+`HOOK_EVENTS` would have to be synced there by hand. Rejected: **shipping the hooks as a Claude
+Code plugin.** It is the structural answer — plugin hooks are loaded from the plugin directory,
+which settings-rewriting tools do not touch — but it changes how the connector is packaged and
+installed, and the timer covers the same failure with a fraction of the surface.

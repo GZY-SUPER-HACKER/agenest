@@ -172,6 +172,19 @@
   color: var(--ink-3);
 }
 
+/* The one action in the empty state: the filter is hiding work, not the absence of work. */
+.rail__empty-btn {
+  display: block;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* --------------------------------------------------------------------------
  * collapse — the one disclosure animation, shared by both rail levels
  *
@@ -586,6 +599,12 @@
    `[data-status="running"]` rule so it wins. */
 .row[data-idle="true"] .row__dot {
   background: var(--quiet);
+}
+
+/* The work failed though the run may have ended cleanly. Red, after the status rules so a
+   completed row that failed verification does not keep the finished grey. */
+.row[data-task-failed="true"] .row__dot {
+  background: var(--dead);
 }
 
 .row__body {

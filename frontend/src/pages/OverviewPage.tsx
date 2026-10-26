@@ -8,16 +8,18 @@
  *
  * So the order of priority here is:
  *   1. blocked on the user   — nothing moves until you answer
- *   2. broken sessions       — you have to act on these
- *   3. running sessions      — the live board
- *   4. idle sessions         — open, but the agent is between replies
- *   5. everything finished   — collapsed behind a disclosure, because it is history
+ *   2. failed the task       — the run ended, the work did not pass
+ *   3. broken sessions       — you have to act on these
+ *   4. running sessions      — the live board
+ *   5. idle sessions         — open, but the agent is between replies
+ *   6. everything finished   — collapsed behind a disclosure, because it is history
  *
  * The tiles partition the board exactly (running + idle + attention + finished = total),
  * which is why a session waiting on you is counted under *needs attention* and not under
  * *running* as well, and why an idle one is counted under *idle* rather than *running*: it is
  * running, but the tile row answers "where do things stand", and one session counted in two
- * buckets makes the numbers stop adding up.
+ * buckets makes the numbers stop adding up. A task-failed session works the same way even when
+ * its status says `completed` — it is drawn under attention and *not* under finished.
  *
  * When nothing needs attention the page says so in one line instead of padding the screen
  * with green checkmarks.
@@ -26,7 +28,7 @@
 import { useState } from "react";
 
 import { IconCheck, IconChevronRight, IconFolder } from "../components/icons";
-import { doingLine, isAwaitingUser, isBusy, isIdle, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskCompleted, isTaskFailed, relativeTime } from "../lib/format";
 import type { Session } from "../types/api";
 
 export function OverviewPage({
@@ -41,8 +43,17 @@ export function OverviewPage({
   // Waiting first, and gated on `running` inside `isAwaitingUser` so a late notification
   // cannot park a finished session here.
   const awaiting = sessions.filter(isAwaitingUser);
-  const broken = sessions.filter((s) => s.status === "failed");
-  const interrupted = sessions.filter((s) => s.status === "interrupted");
+  /*
+    The work failed even though the run may have ended cleanly. Read off the newest event, not
+    off `status`, because verification commonly lands after `session_completed` — see
+    `isTaskFailed`. Listed before `broken` and excluded from it so one session is not drawn
+    twice (the events are mutually exclusive, the statuses are not).
+  */
+  const taskFailed = sessions.filter(isTaskFailed);
+  const broken = sessions.filter((s) => s.status === "failed" && !isTaskFailed(s));
+  const interrupted = sessions.filter(
+    (s) => s.status === "interrupted" && !isTaskFailed(s),
+  );
   /*
     `idle` is a reported display state, not a status (§36): the agent finished its last reply
     and the process is still open. It is taken out of "running" here even though the status
@@ -52,16 +63,19 @@ export function OverviewPage({
   */
   const idle = sessions.filter(isIdle);
   const running = sessions.filter(
-    (s) => isBusy(s) && !isAwaitingUser(s) && !isIdle(s),
+    (s) => isBusy(s) && !isAwaitingUser(s) && !isIdle(s) && !isTaskFailed(s),
   );
   const finished = sessions.filter(
-    (s) => s.status === "completed" || s.status === "unknown",
+    (s) =>
+      (s.status === "completed" || s.status === "unknown") && !isTaskFailed(s),
   );
 
-  const needsAttention = [...awaiting, ...broken, ...interrupted];
-  // Red only when something actually ended badly. A board whose only problem is a session
-  // waiting on an answer is not in a bad state — it is waiting on you, which is amber.
-  const endedBadly = broken.length + interrupted.length > 0;
+  const needsAttention = [...awaiting, ...taskFailed, ...broken, ...interrupted];
+  // Red when something actually ended badly — a failed task counts, even if the process
+  // exited 0. A board whose only problem is a session waiting on an answer is not in a bad
+  // state — it is waiting on you, which is amber.
+  const endedBadly =
+    taskFailed.length + broken.length + interrupted.length > 0;
 
   return (
     <div className="overview">
@@ -192,7 +206,15 @@ function SessionCard({
     reported", which is only an inference from the silence that followed.
   */
   const idle = isIdle(session);
-  const stale = session.possibly_stale && isBusy(session) && !awaiting && !idle;
+  /*
+    The agent ran, the work was checked and failed. It outranks silence for the same reason
+    the other two reports do: "no activity reported" is an inference from the quiet that
+    followed, and it must not overwrite the line that says the task did not pass.
+  */
+  const taskFailed = isTaskFailed(session);
+  const taskCompleted = isTaskCompleted(session);
+  const stale =
+    session.possibly_stale && isBusy(session) && !awaiting && !idle && !taskFailed;
 
   return (
     <button
@@ -201,6 +223,7 @@ function SessionCard({
       data-stale={stale}
       data-awaiting={awaiting}
       data-idle={idle}
+      data-task-failed={taskFailed}
       onClick={() => onOpen(session.id)}
       title={session.title}
     >
@@ -220,6 +243,10 @@ function SessionCard({
       </div>
 
       <div className="card__meta">
+        {taskFailed && <span className="card__verdict">task failed</span>}
+        {taskCompleted && (
+          <span className="card__verdict card__verdict--done">task done</span>
+        )}
         {session.project_name && (
           /*
             The full workspace path is noise in a card: it is 60 characters of directories

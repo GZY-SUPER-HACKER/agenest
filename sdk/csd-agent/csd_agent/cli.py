@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import codex, codex_hooks, config, dsh, heartbeat, hooks, host, install, pi
+from . import codex, codex_hooks, config, dsh, heartbeat, hooks, host, install, pi, skill
 
 
 def _default_python() -> str:
@@ -94,6 +94,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="do not wire Codex's hooks even when it is installed")
     ins.add_argument("--codex-home", default=None,
                      help="Codex home (default: $CODEX_HOME or ~/.codex)")
+    ins.add_argument("--no-skill", action="store_true",
+                     help="do not write the agent-side task-verdict launcher and Claude Code "
+                          "skill (it lets the agent report done/failed itself)")
 
     sub.add_parser("uninstall", help="stop the units and remove the hook entries")
     sub.add_parser("status", help="what this host believes, and whether it is connected")
@@ -151,6 +154,16 @@ def _build_parser() -> argparse.ArgumentParser:
     codex_status.add_argument("--home", default=None)
     codex_un = codex_sub.add_parser("uninstall", help="remove the reporter from Codex hooks.json")
     codex_un.add_argument("--home", default=None)
+
+    # The agent-side verdict path: a launcher the agent can run from its own shell, and the
+    # skill that tells it when to. Optional — the wrapper and the connectors do not need it.
+    skill_cmd = sub.add_parser(
+        "skill", help="the agent-side task-verdict skill (Claude Code)"
+    )
+    skill_sub = skill_cmd.add_subparsers(dest="skill_action", required=True)
+    skill_sub.add_parser("install", help="write the launcher and the skill")
+    skill_sub.add_parser("status", help="whether they are installed")
+    skill_sub.add_parser("uninstall", help="remove them")
 
     return parser
 
@@ -221,7 +234,13 @@ def _cmd_install(args: argparse.Namespace) -> int:
         no_codex=args.no_codex,
         codex_home=args.codex_home,
     )
-    return installer.run()
+    code = installer.run()
+    if code == 0 and not getattr(args, "no_skill", False):
+        # The agent-side verdict path. Optional, but this is the one command the operator
+        # runs, and the files are two small things under `$HOME` that `uninstall` reverses.
+        for line in skill.install():
+            print(f"  {line}")
+    return code
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -475,13 +494,29 @@ def _cmd_codex(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_skill(args: argparse.Namespace) -> int:
+    if args.skill_action == "install":
+        for line in skill.install():
+            print(f"  {line}")
+        return 0
+    if args.skill_action == "status":
+        return skill.status()
+    if args.skill_action == "uninstall":
+        return skill.uninstall()
+    print(f"unsupported skill action: {args.skill_action}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.command == "install":
         return _cmd_install(args)
     if args.command == "uninstall":
-        return install.uninstall()
+        code = install.uninstall()
+        # Written by `install`, so removed with it; only our marked files are touched.
+        skill.uninstall()
+        return code
     if args.command == "status":
         return _cmd_status(args)
     if args.command == "heartbeat":
@@ -497,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_pi(args)
     if args.command == "codex":
         return _cmd_codex(args)
+    if args.command == "skill":
+        return _cmd_skill(args)
 
     print(f"unsupported command: {args.command}", file=sys.stderr)
     return 2

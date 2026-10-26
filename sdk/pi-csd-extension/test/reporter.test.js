@@ -24,6 +24,9 @@ import {
 } from '../csd-reporter.js'
 
 const QUIET = { warn() {}, info() {}, log() {} }
+// The reporter publishes `{cwd → session id}` under `$CSD_AGENT_HOME` for `cpctl task` to
+// find. Point it at a scratch directory so a test run never touches the real ~/.csd.
+process.env.CSD_AGENT_HOME = mkdtempSync(join(tmpdir(), 'csd-pi-test-'))
 const CONFIG = {
   baseUrl: 'http://dashboard',
   token: 'test-token',

@@ -72,6 +72,20 @@ class EventType(str, Enum):
     #: never mistaken for a summary the dashboard composed (docs/design.md §37). It is a
     #: display event and moves no status, exactly like `awaiting_user` / `turn_completed`.
     checkpoint = "checkpoint"
+    #: The *work* failed, though the run may have ended cleanly. A verifier (a test suite, a
+    #: build, a reviewer) or the orchestrator that asked for the work reports this — never
+    #: the agent runtime, which has no notion of whether the task succeeded, and never the
+    #: dashboard. A display event like `awaiting_user`: it moves no status, so it can land
+    #: **after** the session has closed (the ordinary case — verification runs when the
+    #: agent exits) and it clears itself when a retry reports progress (docs/design.md §40).
+    #: `status` keeps describing how the run ended; this describes how the task ended.
+    task_failed = "task_failed"
+    #: The same verdict, positive: the agent (or a verifier) reported that the task it was
+    #: asked to do actually succeeded. Symmetric with `task_failed` in every way — moves no
+    #: status, may land after the session closed, and the newest verdict wins. The pair is
+    #: projected onto the session as `last_verdict`, separately from `last_event`, so that a
+    #: later `turn_completed` or `checkpoint` cannot hide it (docs/design.md §40).
+    task_completed = "task_completed"
     session_completed = "session_completed"
     session_failed = "session_failed"
     session_interrupted = "session_interrupted"
@@ -102,6 +116,8 @@ NON_TERMINAL_EVENTS = frozenset(
         EventType.awaiting_user,
         EventType.turn_completed,
         EventType.checkpoint,
+        EventType.task_failed,
+        EventType.task_completed,
         EventType.heartbeat,
     }
 )
@@ -294,6 +310,12 @@ class SessionOut(ApiModel):
     #: rows that only said "running" would tell the user nothing. `heartbeat` is excluded:
     #: a liveness ping is not something the user did.
     last_event: "EventOut | None" = None
+    #: The newest **task verdict** (`task_failed` / `task_completed`), projected separately
+    #: from `last_event` on purpose. A verdict is usually reported while the turn is still
+    #: ending, so the very next `turn_completed` or `checkpoint` would hide it if the client
+    #: read the verdict off `last_event`. This field keeps the fact; whether it still
+    #: describes the current work is a display decision (docs/design.md §40).
+    last_verdict: "EventOut | None" = None
 
 
 class SessionDetailOut(SessionOut):

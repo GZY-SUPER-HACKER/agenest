@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { IconChevronDown, IconPanel } from "./icons";
-import { doingLine, isAwaitingUser, isBusy, isIdle, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskFailed, relativeTime } from "../lib/format";
 import {
   buildTree,
   HOST_STATE_LABEL,
@@ -84,9 +84,19 @@ function matchesFilter(session: Session, filter: StatusFilter): boolean {
     case "idle":
       return isIdle(session);
     case "failed":
-      return session.status === "failed" || session.status === "interrupted";
+      // A task verdict counts here even when the run itself completed: this filter answers
+      // "what went wrong", and a clean exit whose work failed is exactly that.
+      return (
+        session.status === "failed" ||
+        session.status === "interrupted" ||
+        isTaskFailed(session)
+      );
     case "done":
-      return session.status === "completed" || session.status === "unknown";
+      // ...and is not "done" for the same reason. One filter, one home.
+      return (
+        (session.status === "completed" || session.status === "unknown") &&
+        !isTaskFailed(session)
+      );
     default:
       return true;
   }
@@ -188,26 +198,45 @@ export function Rail({
         </div>
 
         <div className="rail__body">
-          {tree.length === 0 ? (
+          {/*
+            The filter, not the data, is why there is no work to show. This sits above the host
+            rows rather than replacing them: a registered machine with zero matching sessions is
+            still a fact ("this box is connected"), and hiding it would answer the wrong
+            question. Saying "Nothing yet" in this state is a false claim about the machine.
+          */}
+          {visible.length === 0 && sessions.length > 0 && (
+            <p className="rail__empty">
+              No {FILTERS.find((entry) => entry.key === filter)?.label.toLowerCase()} sessions
+              right now.
+              <button
+                className="rail__empty-btn"
+                onClick={() => setFilter("all")}
+              >
+                Show all {sessions.length}
+              </button>
+            </p>
+          )}
+
+          {tree.map((node) => (
+            <HostNodeView
+              key={node.key}
+              node={node}
+              open={!collapsed.hosts.includes(node.key)}
+              collapsedHarnesses={collapsed.harnesses}
+              collapsedProjects={collapsed.projects}
+              activeId={activeId}
+              onToggleHost={() => toggleHost(node.key)}
+              onToggleHarness={toggleHarness}
+              onToggleProject={toggleProject}
+              onSelect={onSelect}
+            />
+          ))}
+
+          {tree.length === 0 && sessions.length === 0 && (
             <p className="rail__empty">
               Nothing yet. A machine appears here once its agent host reports itself, and work
               appears once an agent reports a session.
             </p>
-          ) : (
-            tree.map((node) => (
-              <HostNodeView
-                key={node.key}
-                node={node}
-                open={!collapsed.hosts.includes(node.key)}
-                collapsedHarnesses={collapsed.harnesses}
-                collapsedProjects={collapsed.projects}
-                activeId={activeId}
-                onToggleHost={() => toggleHost(node.key)}
-                onToggleHarness={toggleHarness}
-                onToggleProject={toggleProject}
-                onSelect={onSelect}
-              />
-            ))
           )}
         </div>
 
@@ -447,7 +476,14 @@ function SessionRow({
   // A finished reply is a report too, and it beats the inference drawn from the quiet that
   // follows it. Same resolution as `awaiting`, same reason (OverviewPage's SessionCard).
   const idle = isIdle(session);
-  const stale = session.possibly_stale && isBusy(session) && !awaiting && !idle;
+  /*
+    The work failed while the run may have ended cleanly. It outranks the inferential "maybe
+    offline" for the same reason the other two reports do: the row must say what was reported,
+    not that nothing was heard.
+  */
+  const taskFailed = isTaskFailed(session);
+  const stale =
+    session.possibly_stale && isBusy(session) && !awaiting && !idle && !taskFailed;
 
   return (
     <button
@@ -456,6 +492,7 @@ function SessionRow({
       data-stale={stale}
       data-awaiting={awaiting}
       data-idle={idle}
+      data-task-failed={taskFailed}
       data-fresh={fresh}
       aria-current={active}
       onClick={() => onSelect(session.id)}

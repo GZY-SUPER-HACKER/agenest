@@ -153,6 +153,17 @@
   background: var(--quiet);
 }
 
+/* The work failed, though the run itself may have ended cleanly. Red and filled, because this
+   is an outcome rather than a request (`awaiting` is amber) — and it sits after the status
+   rules so a `completed` run that failed verification does not keep the finished grey. */
+.card[data-task-failed="true"] .card__dot {
+  background: var(--dead);
+}
+
+.card[data-task-failed="true"] .card__bullet {
+  background: var(--dead);
+}
+
 .card__agent {
   flex: 1 1 auto;
   min-width: 0;
@@ -239,6 +250,19 @@
 .card__exit {
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* A verdict, not a status: the *work* failed while the run may have ended fine. Dead colour
+   because it is an outcome; plain words because a colour alone is not an answer. */
+.card__verdict {
+  color: var(--dead);
+  font-weight: 500;
+}
+
+/* The positive half of the same report. Not bright: a finished task recedes like everything
+   else finished; this only says the verdict was explicit rather than assumed. */
+.card__verdict--done {
+  color: var(--ok);
 }
 
 /* --------------------------------------------------------------------------

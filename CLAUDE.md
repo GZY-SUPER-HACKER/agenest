@@ -164,7 +164,7 @@ sdk/csd-agent/   the coding-agent host side: ssh tunnel, liveness probe, Claude 
                  and the DSH reporter's installer (vendor → tarball → profile)
 sdk/dsh-csd-plugin/  the DeepSeek Harness side: a native Cordis plugin that reports turns (§28)
 sdk/pi-csd-extension/  the standalone `pi` CLI side: one extension file that reports runs (§31)
-sdk/csd_nanobot.py, sdk/agent-host-preflight.sh
+sdk/agent-host-preflight.sh
 deploy/          installer, systemd unit, tailscale-prefly.sh
 ```
 
@@ -198,6 +198,16 @@ of your problems.
   the answer. Pi does the same with `turn_end.toolResults`. The payload's `source` says where
   the sentence came from, the key is the agent's own message id, and a reporter with only a
   final answer emits no checkpoints rather than inventing them (§37).
+- **A task verdict is an event; a failed *run* is a status.** `task_failed` / `task_completed`
+  say whether the work passed, and move no status, because the ordinary order is
+  `session_completed` and then the verdict. No agent runtime reports this (its vocabulary is
+  `error`/`stop`, not "the work passed"), so the verdict comes from the agent
+  (`csd-agent skill install` → `cpctl task done|failed`), a verifier (`run-agent.sh --verdict`),
+  or the orchestrator. It is exposed as **`last_verdict`**, projected separately from
+  `last_event`, because the `turn_completed` that follows an agent's own report would otherwise
+  hide it. Unlike `awaiting_user` it is **not** gated on `running`; a completed run that failed
+  the task still belongs under needs-attention. Never infer it from an exit code or the final
+  prose (§40).
 - **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` but
   **not** `updated_at`, and is excluded from timelines and from `last_event`. Otherwise 40
   pings during a test run bury the last thing the user actually did.
