@@ -183,6 +183,135 @@ test('steps become progress events with stable keys', async () => {
   assert.deepEqual(step.body.payload, { turn: 1, step: 2 })
 })
 
+test('an assistant message followed by tools is a checkpoint, and its step is not repeated', async () => {
+  const { ctx, client, handle } = setup()
+  ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
+  ctx.emit('session/event', SESSION, event('step/start', { turn: 1, step: 1 }))
+  ctx.emit(
+    'session/event',
+    SESSION,
+    event('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'm-1',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Now I will add the cursor test' },
+          { type: 'tool-call', id: 't-1', name: 'edit', arguments: '{}' },
+        ],
+      },
+    }),
+  )
+  ctx.emit('session/event', SESSION, event('step/end', { turn: 1, step: 1 }))
+  ctx.emit('session/event', SESSION, event('step/end', { turn: 1, step: 2 }))
+  await handle.flush()
+
+  const events = client.of('event')
+  assert.equal(events.length, 1, 'the checkpoint is the progress track for this turn')
+  assert.equal(events[0].body.event_type, 'checkpoint')
+  assert.equal(events[0].body.message, 'Now I will add the cursor test')
+  assert.equal(events[0].body.payload.source, 'prose')
+  assert.equal(events[0].body.payload.message_id, 'm-1')
+  assert.match(events[0].body.event_key, /:1:message:m-1$/)
+})
+
+test('a text-only assistant message is the answer, not a checkpoint', async () => {
+  const { ctx, client, handle } = setup()
+  ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
+  ctx.emit(
+    'session/event',
+    SESSION,
+    event('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'm-2',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'All tests pass' }],
+      },
+    }),
+  )
+  await handle.flush()
+
+  assert.equal(client.of('event').length, 0)
+})
+
+test('an interrupted assistant prefix is reported as a checkpoint', async () => {
+  const { ctx, client, handle } = setup()
+  ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
+  ctx.emit(
+    'session/event',
+    SESSION,
+    event('assistant/message', {
+      turn: 1,
+      step: 1,
+      interrupted: true,
+      message: {
+        id: 'm-3',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'I was in the middle of' }],
+      },
+    }),
+  )
+  await handle.flush()
+
+  const [checkpoint] = client.of('event')
+  assert.equal(checkpoint.body.event_type, 'checkpoint')
+  assert.equal(checkpoint.body.payload.interrupted, true)
+})
+
+test('todo/write becomes a plan checkpoint with the whole list', async () => {
+  const { ctx, client, handle } = setup()
+  ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
+  ctx.emit(
+    'session/event',
+    SESSION,
+    event('todo/write', {
+      todos: [
+        { content: 'Read the broker', status: 'completed' },
+        { content: 'Write the test', status: 'in_progress' },
+        { content: 'Run the suite', status: 'pending' },
+      ],
+    }),
+  )
+  await handle.flush()
+
+  const [plan] = client.of('event')
+  assert.equal(plan.body.event_type, 'checkpoint')
+  assert.equal(plan.body.message, 'Plan 1/3 · Write the test')
+  assert.deepEqual(plan.body.payload, {
+    source: 'plan',
+    turn: 1,
+    plan: [
+      { title: 'Read the broker', status: 'completed' },
+      { title: 'Write the test', status: 'in_progress' },
+      { title: 'Run the suite', status: 'pending' },
+    ],
+  })
+})
+
+test('after a plan snapshot, step/end stays silent', async () => {
+  const { ctx, client, handle } = setup()
+  ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
+  ctx.emit(
+    'session/event',
+    SESSION,
+    event('todo/write', {
+      todos: [
+        { content: 'Read the broker', status: 'completed' },
+        { content: 'Write the test', status: 'in_progress' },
+      ],
+    }),
+  )
+  ctx.emit('session/event', SESSION, event('step/end', { turn: 1, step: 1 }))
+  await handle.flush()
+
+  const events = client.of('event')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].body.payload.source, 'plan')
+})
+
 test('an approval is awaiting_user, and its decision clears it with progress', async () => {
   const { ctx, client, handle } = setup()
   ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))

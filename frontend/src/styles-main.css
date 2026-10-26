@@ -362,6 +362,15 @@
 .ev[data-kind="turn"]::before {
   border-color: var(--accent);
 }
+/* A checkpoint — a sentence the agent wrote while working. Hollow like a turn boundary:
+   it is activity, not an outcome. The text gets full ink because it is prose addressed to
+   the reader, not machinery (§37). */
+.ev[data-kind="checkpoint"]::before {
+  border-color: var(--accent);
+}
+.ev[data-kind="checkpoint"] .ev__m {
+  color: var(--ink);
+}
 
 .ev__row {
   display: flex;

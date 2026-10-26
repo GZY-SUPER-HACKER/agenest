@@ -213,6 +213,20 @@ session 只报了机器名、但那台机器的 connector 从没注册过（`cpc
 代价说清楚：checkpoint 从外观上不再与回答有区别。"还在干活"这件事由工具行承担——对另外三个
 agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 
+### dashboard 时间线里的 checkpoint 是另一个概念
+
+上面说的是 agenest 对话里的 checkpoint：模型写的一段话，按普通气泡渲染。dashboard 的
+`checkpoint` 事件是 **session 时间线**上的一行，来自 coding agent 自己写的一句话
+（docs/design.md §37）。它不画成气泡，也不进入 status pill：
+
+- 圆点用空心 accent，和 turn boundary 一样——它是"在干活"，不是"结果"；
+- 正文用 `--ink`，因为它是 agent 对读者说的话，不是机器行；`progress` 仍然用 `--ink-2`；
+- payload 里的 `message_id` 不显示，它是幂等键，不是读者需要的信息；
+- 它不进入 needs-attention，也不改变 status；`idle` 会被它清掉（有 checkpoint 就说明又开始干活了）。
+
+没有 checkpoint 的 session 不显示任何占位。"这个 agent 没有中间报告"是诚实的，用工具名或耗时
+补一句话不是。
+
 ## 附件：卡片，不是链接
 
 文件在对话里是**卡片**，不是一行带下划线的链接。卡片把三个问题一次答完：这是什么（名字 +

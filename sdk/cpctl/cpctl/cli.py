@@ -36,6 +36,23 @@ from pathlib import Path
 
 PROG = "cpctl"
 
+#: Mirrors `backend/app/schemas.py`'s `EventType`. The CLI is a separate, zero-dependency
+#: package and cannot import the server, so `test_cpctl_offers_every_event_type_the_server_accepts`
+#: pins the two lists together: a server event the CLI cannot send is a feature nobody can use.
+EVENT_TYPES = (
+    "session_started",
+    "status_changed",
+    "progress",
+    "note",
+    "awaiting_user",
+    "turn_completed",
+    "checkpoint",
+    "session_completed",
+    "session_failed",
+    "session_interrupted",
+    "heartbeat",
+)
+
 #: Exit code for "the report did not reach the server". Deliberately non-zero but distinct
 #: from usage errors (2) so a wrapper script can log it without masking a real CLI mistake.
 EXIT_REPORT_FAILED = 3
@@ -465,18 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--type",
         dest="type",
         default="progress",
-        choices=[
-            "session_started",
-            "status_changed",
-            "progress",
-            "note",
-            "awaiting_user",
-            "turn_completed",
-            "session_completed",
-            "session_failed",
-            "session_interrupted",
-            "heartbeat",
-        ],
+        choices=list(EVENT_TYPES),
     )
     event.add_argument("--message", "-m", required=True, help="short human-readable message")
     event.add_argument("--key", help="idempotency key (default: derived from the message)")

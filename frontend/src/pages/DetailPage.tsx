@@ -310,7 +310,16 @@ function EventRow({ event }: { event: SessionEvent }) {
   }
 
   const kind = eventKind(event.event_type);
-  const payload = event.payload ? Object.entries(event.payload) : [];
+  /*
+    A checkpoint's `message_id` is the connector's idempotency key, not something a reader
+    needs. It stays in the record and is hidden here — the same rule as not drawing a tool's
+    internal ids. Scoped to checkpoints so no other event's payload is silently altered.
+  */
+  const payload = event.payload
+    ? Object.entries(event.payload).filter(
+        ([key]) => !(event.event_type === "checkpoint" && key === "message_id"),
+      )
+    : [];
 
   return (
     <li className="ev" data-kind={kind}>

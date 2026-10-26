@@ -160,6 +160,23 @@ def main() -> None:
             # between rows instead of all reading "now".
             time.sleep(0.4)
 
+            # One agent-authored sentence per running session, so the seeded timeline shows
+            # the `checkpoint` event without needing a real Claude Code run (design.md §37).
+            if terminal_status == "running" and i == 0:
+                post(
+                    f"/api/sessions/{sid}/events",
+                    {
+                        "event_type": "checkpoint",
+                        "message": f"Now I'll work on: {step}",
+                        "payload": {
+                            "source": "prose",
+                            "turn": 1,
+                            "message_id": f"seed-{sid}-{i}",
+                        },
+                        "event_key": f"seed-checkpoint-{sid}-{i}",
+                    },
+                )
+
         if terminal_status in ("running", "awaiting_user"):
             for _ in range(2):
                 post(

@@ -54,6 +54,18 @@ class Tracked:
     #: two turns that carry the same prompt text ("continue") would otherwise collapse into a
     #: single timeline row. A resumed conversation keeps counting rather than restarting.
     turn: int = 0
+    #: The assistant message being streamed by `MessageDisplay`, kept here between hook
+    #: processes. A message only becomes a checkpoint once a tool batch proves it was
+    #: commentary rather than the answer, and that proof arrives in a *later* hook
+    #: (`PostToolBatch`). The text is capped so a runaway message cannot grow this file; the
+    #: dashboard caps it again on ingest.
+    pending_text: str = ""
+    #: The agent's own id for that message. It is the checkpoint's idempotency key, so a retry
+    #: or a second flush re-sends the same sentence without stacking a row.
+    pending_message_id: str = ""
+    #: True once `MessageDisplay` reported the message's final batch. A partial message is not
+    #: a checkpoint: the model may still be mid-sentence when a tool batch starts.
+    pending_final: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -83,6 +95,9 @@ def load() -> dict[str, Tracked]:
                 started_at=started,
                 last_seen_at=float(raw.get("last_seen_at") or started),
                 turn=int(raw.get("turn") or 0),
+                pending_text=str(raw.get("pending_text") or ""),
+                pending_message_id=str(raw.get("pending_message_id") or ""),
+                pending_final=bool(raw.get("pending_final")),
             )
         except (KeyError, TypeError, ValueError):
             # A malformed row is dropped rather than crashing a hook. Losing one tracked
@@ -235,19 +250,28 @@ def process_alive(entry: Tracked) -> bool:
 
 
 def find_cc_pid() -> int:
-    """Walk our own parent chain to the Claude Code process, or 0 if not found.
+    """Walk our own parent chain to the Claude Code process, or 0 if not found."""
+    return find_pid(("claude",))
 
-    A hook is spawned by Claude Code, so the answer is an ancestor — which is why the
-    wrapper `exec`s the interpreter rather than backgrounding it: detaching would reparent
-    us to init and the chain would be gone.
 
-    Matching is on the basename of both `exe` and argv[0], because CC ships as a native
-    binary on some platforms and a Node script on others, and the two look nothing alike
-    from the outside. Anything under our own home is skipped, so the wrapper that invoked
-    us can never be mistaken for the agent.
+def find_pid(prefixes: tuple[str, ...]) -> int:
+    """Walk our own parent chain to an ancestor whose name starts with one of `prefixes`.
+
+    A hook is spawned by the agent, so the answer is an ancestor — which is why the wrapper
+    `exec`s the interpreter rather than backgrounding it: detaching would reparent us to init
+    and the chain would be gone.
+
+    Matching is on the basename of both `exe` and argv[0], because the agents ship as a native
+    binary on some platforms and a Node script on others, and the two look nothing alike from
+    the outside. Anything under our own home is skipped, so the wrapper that invoked us can
+    never be mistaken for the agent.
+
+    `prefixes` is a tuple because two agents share this package: `("claude",)` for Claude Code
+    and `("codex",)` for Codex. An unknown pid (0) is a real answer; guessing one would let the
+    heartbeat announce the death of a live session.
     """
     if os.name == "nt":
-        return _win_find_cc_pid()
+        return _win_find_pid(prefixes)
     skip = str(config.agent_home())
     pid = os.getpid()
     for _ in range(24):
@@ -264,9 +288,14 @@ def find_cc_pid() -> int:
         for candidate in (os.path.basename(argv0), exe):
             if not candidate or skip in candidate:
                 continue
-            if candidate == "claude" or candidate.startswith("claude-"):
+            if _name_matches(candidate, prefixes):
                 return pid
     return 0
+
+
+def _name_matches(name: str, prefixes: tuple[str, ...]) -> bool:
+    base = name[:-4] if name.lower().endswith(".exe") else name
+    return any(base == prefix or base.startswith(f"{prefix}-") for prefix in prefixes)
 
 
 # --------------------------------------------------------------------------- #
@@ -306,10 +335,10 @@ def _win_process_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _win_find_cc_pid() -> int:
-    """Walk our parent chain via Toolhelp32 and return the first Claude Code process.
+def _win_find_pid(prefixes: tuple[str, ...]) -> int:
+    """Walk our parent chain via Toolhelp32 and return the first matching agent process.
 
-    Toolhelp gives an executable name but not a command line, so a Claude Code launched as
+    Toolhelp gives an executable name but not a command line, so an agent launched as
     `node.exe …` cannot be told apart from any other Node process. Returning 0 in that case
     is deliberate: `heartbeat` already treats an unknown pid as "cannot judge", while a
     guessed pid would let the probe announce the death of a live session.
@@ -368,17 +397,17 @@ def _win_find_cc_pid() -> int:
             break
         pid = parent
         name = parent_of.get(pid, (0, ""))[1]
-        if name == "claude.exe" or name.startswith("claude-"):
+        if _name_matches(name, prefixes):
             return pid
 
     # The chain can break on Windows: a launcher that exits leaves its child pointing at a
-    # dead parent pid (there is no reparenting), and the walk then stops before reaching
-    # Claude Code. Falling back to "the only claude.exe on this machine" is safe — and if
+    # dead parent pid (there is no reparenting), and the walk then stops before reaching the
+    # agent. Falling back to "the only matching executable on this machine" is safe — and if
     # there is more than one, returning 0 is the right answer, because attributing a session
     # to the wrong window would let the heartbeat close a live session.
     candidates = sorted(
         candidate
         for candidate, (_parent, name) in parent_of.items()
-        if name == "claude.exe" or name.startswith("claude-")
+        if _name_matches(name, prefixes)
     )
     return candidates[0] if len(candidates) == 1 else 0

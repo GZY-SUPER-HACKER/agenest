@@ -66,6 +66,12 @@ class EventType(str, Enum):
     #: boundary, never a lifecycle signal (docs/design.md §15, §36). The UI reads it to render
     #: `idle` beside the session's reported `running`; it moves no status.
     turn_completed = "turn_completed"
+    #: A sentence the agent itself wrote while working — the middle ground between one line
+    #: per turn and one row per tool call. `payload.source` names where it came from
+    #: (`prose` today, `plan`/`step` for reporters that can supply them), so a checkpoint is
+    #: never mistaken for a summary the dashboard composed (docs/design.md §37). It is a
+    #: display event and moves no status, exactly like `awaiting_user` / `turn_completed`.
+    checkpoint = "checkpoint"
     session_completed = "session_completed"
     session_failed = "session_failed"
     session_interrupted = "session_interrupted"
@@ -95,6 +101,7 @@ NON_TERMINAL_EVENTS = frozenset(
         EventType.note,
         EventType.awaiting_user,
         EventType.turn_completed,
+        EventType.checkpoint,
         EventType.heartbeat,
     }
 )

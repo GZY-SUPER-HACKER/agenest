@@ -224,6 +224,25 @@ def test_invalid_event_type_is_rejected(session_id: str, client: TestClient) -> 
     assert r.status_code == 422
 
 
+def test_cpctl_offers_every_event_type_the_server_accepts() -> None:
+    """The CLI is a separate zero-dependency package, so the two lists are pinned together.
+
+    A server event the CLI cannot send is a feature nobody can use; this is how the
+    `checkpoint` type would have been silently unusable.
+    """
+    import sys
+    from pathlib import Path
+
+    from app.schemas import EventType
+
+    cpctl = Path(__file__).resolve().parents[2] / "sdk" / "cpctl"
+    if str(cpctl) not in sys.path:
+        sys.path.insert(0, str(cpctl))
+    from cpctl.cli import EVENT_TYPES
+
+    assert set(EVENT_TYPES) == {event.value for event in EventType}
+
+
 def test_server_generates_session_id(client: TestClient) -> None:
     r = client.post(
         "/api/sessions", json={"agent_type": "codex", "title": "x"}, headers=INGEST
@@ -484,6 +503,54 @@ def test_last_event_ignores_status_changed(
     body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
     assert body["status"] == "interrupted"
     assert body["last_event"]["message"] == "writing the patch"
+
+
+def test_a_checkpoint_is_activity_without_moving_status(
+    session_id: str, client: TestClient
+) -> None:
+    """A checkpoint answers "what is it doing now", not "how did this end".
+
+    It must behave like `progress`: surface on the card as the newest activity, and leave the
+    status column alone. §2/§3 are not repealed by a richer event type.
+    """
+    r = report(
+        client,
+        session_id,
+        "checkpoint",
+        "Now I'll add the cursor test",
+        payload={"source": "prose", "turn": 2, "message_id": "m-1"},
+        event_key="cp-1",
+    )
+    assert r.status_code == 202
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "running"
+    assert body["last_event"]["event_type"] == "checkpoint"
+    assert body["last_event"]["message"] == "Now I'll add the cursor test"
+    assert body["last_event"]["payload"]["source"] == "prose"
+
+
+def test_a_checkpoint_does_not_reopen_a_terminal_session(
+    session_id: str, client: TestClient
+) -> None:
+    """Checkpoints arrive mid-work; one landing late must not resurrect a finished row."""
+    report(client, session_id, "session_completed", "done", event_key="done-1")
+    r = report(client, session_id, "checkpoint", "late sentence", event_key="cp-late")
+    assert r.status_code == 202
+    assert client.get(f"/api/sessions/{session_id}", headers=READ).json()["status"] == "completed"
+
+
+def test_duplicate_checkpoint_key_inserts_one_row(
+    session_id: str, client: TestClient
+) -> None:
+    """The connector keys a checkpoint on the agent's own message id.
+
+    A retried `PostToolBatch` therefore re-sends the same sentence without stacking a second
+    row — §7 applies to this event type like every other.
+    """
+    first = report(client, session_id, "checkpoint", "same sentence", event_key="cp-2").json()
+    second = report(client, session_id, "checkpoint", "same sentence", event_key="cp-2").json()
+    assert first["event"]["id"] == second["event"]["id"]
+    assert client.get(f"/api/sessions/{session_id}/events", headers=READ).json()["total"] == 2
 
 
 # --------------------------------------------------------------------------- #

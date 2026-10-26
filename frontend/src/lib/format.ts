@@ -16,6 +16,7 @@ export type EventKind =
   | "interrupted"
   | "awaiting"
   | "turn"
+  | "checkpoint"
   | "progress"
   | "note";
 
@@ -33,6 +34,8 @@ export function eventKind(type: EventType): EventKind {
       return "awaiting";
     case "turn_completed":
       return "turn";
+    case "checkpoint":
+      return "checkpoint";
     default:
       return "progress";
   }

@@ -71,14 +71,19 @@ def last_report_at() -> float:
         return 0.0
 
 
-def report(connected: bool = True) -> runtime.Result:
-    """Say this host is here, or that it is leaving. Never raises."""
+def report(connected: bool = True, agent_type: str = AGENT_TYPE) -> runtime.Result:
+    """Say this host is here, or that it is leaving. Never raises.
+
+    `agent_type` is a parameter because this one package now speaks for two coding agents.
+    The dashboard keys a host on `(label, agent_type)`, so Claude Code and Codex on the same
+    box are two facts, not one row whose type keeps changing (§20).
+    """
     try:
         cfg = config.AgentConfig.load()
     except FileNotFoundError as exc:
         return runtime.Result(False, detail=str(exc))
 
-    args = ["host", "report", "--label", cfg.label, "--agent-type", AGENT_TYPE]
+    args = ["host", "report", "--label", cfg.label, "--agent-type", agent_type]
     if not connected:
         args.append("--disconnected")
     if connected:
@@ -106,7 +111,7 @@ def report(connected: bool = True) -> runtime.Result:
         _save_state(
             {
                 "label": cfg.label,
-                "agent_type": AGENT_TYPE,
+                "agent_type": agent_type,
                 "connected": connected,
                 "last_report_at": time.time(),
             }

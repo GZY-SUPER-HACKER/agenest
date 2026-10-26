@@ -20,6 +20,7 @@ export type EventType =
   | "note"
   | "awaiting_user"
   | "turn_completed"
+  | "checkpoint"
   | "session_completed"
   | "session_failed"
   | "session_interrupted"

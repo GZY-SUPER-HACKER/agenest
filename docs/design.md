@@ -1851,12 +1851,15 @@ treating an unrecognized reason as success turns uncertainty into a verdict. Bot
 answer. `session_shutdown` closes an open run as `interrupted` and is bounded to two seconds:
 Pi awaits that hook, and a dead dashboard must not hold the agent's exit.
 
-**The dashboard's own personal agent is the same binary, and must not report.** The Agent tab's
-`native` backend spawns `pi` for every conversation, and those runs are the channel, not coding
-sessions — reporting them would show the dashboard talking to itself. The backend already marks
-every child with `CSD_AGENT=1`; the extension returns without registering a single handler when it
-sees it. `CSD_PI_REPORTER=0` is the operator's equivalent opt-out. No backend change was needed,
-which is the point: the marker existed for exactly this.
+**The dashboard's own personal agent is the same binary, and must not report — but only it.**
+The Agent tab's `native` backend spawns `pi` for every conversation, and those runs are the
+channel, not coding sessions; reporting them would show the dashboard talking to itself. The
+backend marks the child with `CSD_AGENT=1` and its own pid in `CSD_AGENT_PARENT`; the extension
+is inert only when the marker is present **and** `process.ppid` matches. The parent half matters:
+a `pi` run the personal agent spawns is a coding agent, inherits the environment, and has a
+different parent — so it reports. Silencing it would make the channel unable to drive the agent
+it was asked to drive. A bare `CSD_AGENT=1` (an older backend with no parent marker) stays inert,
+which is the compatibility rule. `CSD_PI_REPORTER=0` is the operator's equivalent opt-out.
 
 **One copied file, in the global directory.** Pi discovers `*.js` under the agent's `extensions/`
 at startup and has no plugin manager, so the install is a copy and uninstall is a delete —
@@ -2130,3 +2133,157 @@ sticky, so the same process's next prompt could never be shown as running again.
 for every long tool call. Rejected: **a sixth `SessionStatus`.** An idle session is still
 running; two answers to "is it running" would force every later reader of the status column to
 choose between them — §20's argument about hosts, applied to a value.
+
+
+## 37. A checkpoint is the agent's own sentence, and it is an event
+
+A turn can run for twenty minutes. Between the prompt (`Turn N: …`) and `Reply finished` the
+dashboard showed nothing, so the one question it exists to answer — *what is it doing right
+now* — was unanswered for the whole time it mattered. The other obvious granularity, one row
+per tool call, is worse: it buries the two rows a person reads, and `PostToolUse` carries the
+file contents and command lines the README already refuses to upload.
+
+The middle layer is the agent's own prose. Agentic turns are full of sentences like *"Now
+I'll add the cursor test"* — the model writes them for itself before it acts. A **checkpoint**
+is one of those sentences, reported as an event:
+
+```
+event_type: checkpoint
+message:    "Now I'll add the cursor test"
+payload:    { source: "prose", turn: 3, message_id: "…" }
+```
+
+- **The agent is the author; the connector is only the carrier.** A checkpoint is text the
+  model wrote, never a summary the dashboard composed. `source` names where it came from
+  (`prose` today; `plan` / `step` for reporters that can supply them), so the page can never
+  draw a machine fact as an agent sentence (§2 applied to prose).
+- **It is an event, not a status.** It moves no status, and it is not a sixth `SessionStatus`
+  — the same argument as `awaiting_user` (§16b) and `idle` (§36). It is a display event, so
+  the next one supersedes it and there is nothing to clear.
+- **`idle` is cleared by it.** A checkpoint is evidence of work: if the newest event is a
+  checkpoint, the session is not idle. `isIdle` reads the exact `turn_completed` type, so this
+  needed no code — it is the same self-clearing shape §36 relies on.
+
+### How a sentence proves it was not the answer
+
+A message that is followed by tools was commentary. A message with no tool after it is the
+answer. That distinction is the whole rule, and no model cooperation is required:
+
+- **Claude Code**: `MessageDisplay` fires while the text is displayed, in batches.
+  `csd-agent` accumulates it into `tracked.json` (`pending_text`, `pending_message_id`,
+  `pending_final`) and reports **nothing** there. `PostToolBatch` — once per batch of parallel
+  tool calls, before the next model call — is what proves the message was commentary, and is
+  the only place a checkpoint is sent. `Stop` discards whatever is still pending, because that
+  message is the reply.
+- **Pi**: `turn_end` carries both `message` and `toolResults`. A non-empty `toolResults` and a
+  non-empty first text block is a checkpoint; an empty one is the answer and is left to
+  `agent_settled`. No state machine is needed at all.
+- **DSH**: `assistant/message` carries the text blocks and the tool-call blocks in one event,
+  so the rule needs no pending state either: text plus a tool call is commentary, text alone is
+  the answer. `todo/write` adds the plan layer for free — a whole-list snapshot where the latest
+  write wins, which is exactly the `source: "plan"` shape (§28).
+- **Everything else**: a backend with no prose surface reports no checkpoints. That absence is
+  honest and is rendered as such — never filled in from tool names, elapsed time, or an event
+  count.
+
+Both hooks are installed **synchronously**, and the ordering is the reason. `MessageDisplay`
+must finish writing the pending text before the model can ask for a tool, or the batch that
+should flush it finds nothing. `PostToolBatch` must read and clear that text before the next
+`MessageDisplay` can replace it; an async flush can wake up after the next message has started
+and attribute that message to the previous batch. The cost is one `cpctl` call between a tool
+batch and the next model call. A dashboard that is down can therefore delay the agent by the
+CLI's 3 s timeout — the same failure mode `Stop` and `UserPromptSubmit` already carry, not a
+new one. A per-message file plus an async flusher is the upgrade if that cost ever matters;
+it is not worth the extra identity scheme today.
+
+### Identity is the agent's own id, not the text
+
+The checkpoint's `event_key` is the agent's `message_id` (Pi: run + turn number), not the
+message text. `cpctl` derives a key from the message when none is supplied, which would
+collapse two checkpoints that happen to begin with the same words — and the same sentence can
+legitimately be said twice in one session. A retried `PostToolBatch` re-sends the same id and
+inserts no second row (§7).
+
+### What is deliberately not stored
+
+`MessageDisplay` is a *display* stream, not a record. Only the completed sentence becomes an
+event; the intermediate deltas never reach SQLite. That is §4's split applied to prose, and it
+is the same rule OpenHands states for `StreamingDeltaEvent`: deltas are a UX affordance, not
+part of the conversation record. The source of truth for what the agent said remains the
+agent's own transcript, which this service does not read.
+
+### The capability levels, so a reporter cannot pretend
+
+| Level | What it has | Example |
+|---|---|---|
+| `stream` | token/chunk stream | Claude `MessageDisplay`, Pi `message_update`, ACP `agent_message_chunk` |
+| `complete` | one completed message item | DSH `assistant/message`, Pi `turn_end.message`, Codex `item.completed`, OpenHands `MessageEvent` |
+| `final_only` | only the last answer | Codex hooks (`stop.last_assistant_message`), Claude `Stop` |
+| `none` | no reliable prose surface | a wrapper that only has a process exit code |
+
+A reporter at `final_only` must not emit checkpoints. The codex app-server path — where
+`item/agentMessage/delta` is the stream and `MessagePhase` (`commentary` / `partial_answer` /
+`final_answer`) is the agent's own classification — is the next place this contract can be
+filled in without changing the event; it is deliberately not wired yet, because it changes who
+owns the Codex process and who answers its approval requests.
+
+Rejected: **plan-first.** A plan snapshot (ACP `plan`, Codex `turn/plan/updated`, Claude
+`TaskCreated`/`TaskCompleted`) is richer where it exists, but it depends on the model using a
+task tool; making that a requirement is exactly what this feature is trying to avoid. Rejected:
+**one row per `PostToolUse`.** Volume, and the payload is the user's code. Rejected: **reading
+the transcript or rollout file.** It is an internal artifact, and §28/§31 already rejected that
+coupling for two other agents. Rejected: **a dashboard-side summarizer.** An LLM reading tool
+calls to write progress is a second author whose mistakes cannot be audited, and §2 forbids the
+first-person claim that would result.
+
+
+## 38. Codex reports turns through its hooks, and never answers an approval
+
+Codex is a coding agent and follows §13's shape: the host reports, the dashboard reads. It has
+two surfaces, and they are not interchangeable.
+
+**`app-server` is the rich one, and it is a long-lived client.** The connection is the
+subscription — a client that disconnects stops receiving notifications, and completed items can
+only be recovered from `thread/items/list`. It carries `item/agentMessage` (with a `phase` of
+`commentary` / `partial_answer` / `final_answer`), `turn/plan/updated`, and the control calls
+(`turn/start`, `turn/steer`, `turn/interrupt`). It also sends approval *requests* down the same
+connection. That is why it is a different product shape, not a better reporter: the client is a
+participant, and if it is the only client, an unanswered approval hangs the turn.
+
+**Hooks are the short-lived surface this package installs.** Codex loads
+`$CODEX_HOME/hooks.json`; the payloads are Claude Code-compatible (JSON on stdin,
+`hook_event_name` in PascalCase), and the command is a normal short-lived process. What they
+carry:
+
+| Event | What it gives the dashboard |
+|---|---|
+| `SessionStart` / `SessionEnd` | session lifecycle (open; close as completed) |
+| `UserPromptSubmit` | the prompt → `Turn N: <prompt>` |
+| `Stop` | `turn_completed`; `last_assistant_message` is the answer |
+| `PermissionRequest` | `awaiting_user` — **observed, never decided** |
+| `Interrupt` | the same turn boundary as `Stop`, keyed together |
+| `PreToolUse` / `PostToolUse` | tool name, `tool_input`, `tool_response` — machinery, not prose |
+| `PreModelRequest` / `PostModelRequest` | a model call happened; status and usage, **no text** |
+| `Subagent*` / `PreCompact` / `PostCompact` | structure, not progress |
+
+There is no Codex equivalent of `MessageDisplay` or `PostToolBatch`. The only supported
+assistant prose is `stop.last_assistant_message`, which is the answer; reporting it as a
+checkpoint would show every reply as progress. So this reporter is **turn-level on purpose**
+and emits no checkpoints — the same rule §37 applies to a `final_only` capability. A reporter
+that invented them from tool names would be §2's inference wearing a progress bar.
+
+**An approval is broadcast; the first answer wins.** `PermissionRequest` may return allow or
+deny, and the outcome is a real control surface. This reporter returns **nothing**, so Codex's
+own flow (the TUI, or whatever reviewer the turn configured) decides. A deny here would race
+the human: the request goes to every connected client and the first response resolves it. The
+same rule applies to an app-server observer. Only an **owned/headless** turn may decline
+automatically, and the correct form is `approvalPolicy: "never"` at turn creation — which is
+exactly what `codex exec` does. It does not deny requests; it never creates them.
+
+Rejected: **wiring `PostToolUse` to synthesize checkpoints.** It fires per call, and
+`tool_input` / `tool_response` are the user's code — the same privacy argument §37 makes for
+Claude Code. Rejected: **reading `transcript_path`.** It is an internal artifact, and §28/§31
+already rejected that coupling for two other agents. Rejected: **auto-denying to "align with
+`-p`".** `-p` is headless: it sets `approvalPolicy: "never"` and never receives the request.
+Auto-denying in a user-driven thread is not the same policy; it is a reporter overriding the
+human.

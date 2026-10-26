@@ -9,7 +9,8 @@ What it touches, exhaustively:
 
     ~/.csd/                       created (agent.json, env, cpctl/, csd-agent/, bin/, state/)
     ~/.config/systemd/user/       three units: tunnel, heartbeat service, heartbeat timer
-    ~/.claude/settings.json       four hook entries merged in, never overwritten
+    ~/.claude/settings.json       seven hook entries merged in, never overwritten
+    ~/.codex/hooks.json           six Codex hook entries merged in, foreign hooks preserved
 
 And what it deliberately does not touch: no sudo anywhere, no pip, no conda environment, no
 package manager, nothing outside your home directory. On a shared lab machine that is the
@@ -27,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import access, config, dsh, host, pi
+from . import access, codex, config, dsh, host, pi
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 SETTINGS = Path.home() / ".claude" / "settings.json"
@@ -42,10 +43,16 @@ LOCAL_ENV_FILE = Path("/etc/csd/csd.env")
 #: to this install and appears in no hand-written hook.
 HOOK_MARKER = str(config.bin_dir() / "csd-hook")
 
+#: The same idea for Codex's hooks file. Kept separate from `HOOK_MARKER` because the two
+#: files are different documents and uninstall must not confuse one agent's entries for the
+#: other's.
+CODEX_HOOK_MARKER = str(config.bin_dir() / "csd-hook-codex")
+
 #: Which Claude Code events we wire. `Stop` is a **turn** boundary and reports an event, never
 #: a session end: it fires per reply, and wiring it to a status would make every session
 #: terminal after its first answer (see csd_agent/hooks.py for the full argument).
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "Notification", "SessionEnd")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "MessageDisplay",
+               "PostToolBatch", "Stop", "Notification", "SessionEnd")
 
 #: Seconds Claude Code waits for a hook before giving up. cpctl is capped at 2 s per attempt
 #: and one retry by the wrapper, so this is a backstop for a wedged interpreter.
@@ -249,13 +256,31 @@ export PYTHONPATH="$CSD_AGENT_HOME/csd-agent"
 exec {python} -m csd_agent hook "$@"
 """
 
+CODEX_HOOK_WRAPPER = """\
+#!/usr/bin/env bash
+# csd-hook-codex — the command Codex's hooks invoke. Written by `csd-agent install`.
+#
+# The same `exec` rule as csd-hook: Codex spawns this hook, so the interpreter must replace
+# the shell rather than be spawned by it. That keeps the process ancestry intact, which is how
+# csd_agent.tracked.find_pid(("codex",)) reaches the agent and records a pid for the heartbeat.
+set -uo pipefail
+
+export CSD_AGENT_HOME="${{CSD_AGENT_HOME:-{home}}}"
+export CSD_RETRIES="${{CSD_RETRIES:-1}}"
+export CSD_TIMEOUT="${{CSD_TIMEOUT:-2}}"
+export PYTHONPATH="$CSD_AGENT_HOME/csd-agent"
+
+exec {python} -m csd_agent hook-codex "$@"
+"""
+
 
 class Installer:
     def __init__(self, cfg: config.AgentConfig, heartbeat_minutes: int = 5,
                  token: str | None = None, pkg_source: Path | None = None,
                  no_dsh: bool = False, dsh_profiles: list[str] | None = None,
                  dsh_home: str | None = None, no_pi: bool = False,
-                 pi_home: str | None = None) -> None:
+                 pi_home: str | None = None, no_codex: bool = False,
+                 codex_home: str | None = None) -> None:
         self.cfg = cfg
         self.heartbeat_minutes = heartbeat_minutes
         self.token = token
@@ -267,6 +292,9 @@ class Installer:
         self.no_pi = no_pi
         self.pi_home = pi_home
         self.pi_ok = True
+        self.no_codex = no_codex
+        self.codex_home = codex_home
+        self.codex_ok = True
         self.notes: list[str] = []
 
     # ------------------------------------------------------------------ #
@@ -279,22 +307,24 @@ class Installer:
 
     # ------------------------------------------------------------------ #
     def run(self) -> int:
-        self.step("1/8  vendoring cpctl and csd-agent")
+        self.step("1/9  vendoring cpctl and csd-agent")
         self._vendor()
-        self.step("2/8  resolving the ingest token")
+        self.step("2/9  resolving the ingest token")
         if not self._write_env():
             return 1
-        self.step("3/8  writing config and the hook wrapper")
+        self.step("3/9  writing config and the hook wrappers")
         self._write_config_and_wrapper()
-        self.step("4/8  systemd user units")
+        self.step("4/9  systemd user units")
         self._write_units()
-        self.step("5/8  Claude Code hooks")
+        self.step("5/9  Claude Code hooks")
         self._merge_hooks()
-        self.step("6/8  DeepSeek Harness reporter")
+        self.step("6/9  Codex hooks")
+        self._install_codex()
+        self.step("7/9  DeepSeek Harness reporter")
         self._install_dsh()
-        self.step("7/8  Pi reporter")
+        self.step("8/9  Pi reporter")
         self._install_pi()
-        self.step("8/8  starting and verifying")
+        self.step("9/9  starting and verifying")
         return self._verify()
 
     # ------------------------------------------------------------------ #
@@ -474,6 +504,14 @@ class Installer:
         )
         wrapper.chmod(0o755)
         self.note(f"hook wrapper written to {wrapper}")
+
+        codex_wrapper = config.bin_dir() / "csd-hook-codex"
+        codex_wrapper.write_text(
+            CODEX_HOOK_WRAPPER.format(home=config.agent_home(), python=self.cfg.python),
+            encoding="utf-8",
+        )
+        codex_wrapper.chmod(0o755)
+        self.note(f"Codex hook wrapper written to {codex_wrapper}")
 
     # ------------------------------------------------------------------ #
     def _write_units(self) -> None:
@@ -710,6 +748,33 @@ class Installer:
         self.note(f"hooks merged: {', '.join(added)}")
 
     # ------------------------------------------------------------------ #
+    def _install_codex(self) -> None:
+        """Merge this connector's handlers into Codex's `hooks.json`.
+
+        A host with no Codex is left alone: the installer still wires Claude Code, DSH and Pi.
+        A host that *has* Codex is a host whose operator expects it on the dashboard, so a
+        malformed hooks file is reported and fails verification rather than being overwritten.
+        """
+        if self.no_codex:
+            self.note("skipped (--no-codex)")
+            return
+
+        home = codex.codex_home(self.codex_home)
+        if not home.exists() and not shutil.which("codex"):
+            self.note(f"Codex not found at {home}; skipped")
+            self.note("  (launch Codex once, then re-run install, if it is installed elsewhere)")
+            return
+
+        result = codex.install(home)
+        for line in result.notes:
+            self.note(line)
+        self.codex_ok = result.ok
+        if result.events:
+            self.note(f"Codex hooks merged: {', '.join(result.events)}")
+        if not self.codex_ok:
+            self.note("PROBLEM: Codex's hooks file could not be updated; see above")
+
+    # ------------------------------------------------------------------ #
     def _install_dsh(self) -> None:
         """Wire DSH with the same one command that wires Claude Code's hooks.
 
@@ -881,6 +946,13 @@ class Installer:
                 self.note(f"note: could not register this host yet ({result.detail})")
                 self.note("      the heartbeat timer will report it on its next run")
 
+            # A second host row, because the dashboard keys one on `(label, agent_type)` and
+            # this machine now speaks for two coding agents (§20).
+            if codex.installed_events(self.codex_home):
+                codex_host = host.report(connected=True, agent_type="codex")
+                self.note("codex host registered" if codex_host.ok
+                          else f"note: could not register the codex host ({codex_host.detail})")
+
             # A key may already be waiting: the user can approve a host the moment it appears,
             # and on a re-install the approval from before is still on file. One sync here means
             # the first heartbeat is not the first time it could have worked.
@@ -914,6 +986,18 @@ class Installer:
                 self.note(f"PROBLEM: reporter missing from {', '.join(broken)}; re-run install")
         elif not self.no_dsh:
             self.note("dsh reporter: not present (DeepSeek Harness not installed here)")
+
+        # Codex is additive in the same way. The hooks file is shared with the user, so the
+        # check is "are our handlers still in it", not "does the file exist".
+        if not self.codex_ok:
+            ok = False
+        codex_events = codex.installed_events(self.codex_home)
+        if codex_events:
+            root = codex.codex_home(self.codex_home)
+            self.note(f"codex hooks: {', '.join(codex_events)} at {codex.hooks_path(root)}")
+            self.note("             (Codex trusts them after you approve them)")
+        elif not self.no_codex:
+            self.note("codex hooks: not present (Codex not installed here)")
 
         # Pi is additive in the same way: its extension reports the `pi` host row itself, so
         # there is no second heartbeat here. What this check owns is the install the operator
@@ -1065,6 +1149,13 @@ def uninstall() -> int:
     if (cfg and cfg.pi_extension) or pi_target.exists():
         print("\n== Pi")
         pi.uninstall(home=pi_home, label=cfg.label if cfg else None)
+
+    # Codex's hooks file is shared with the user, so removal is by our command marker only.
+    # The host row gets its goodbye here too, while the tunnel can still carry it.
+    if codex.installed_events():
+        print("\n== Codex")
+        host.report(connected=False, agent_type="codex")
+        codex.uninstall()
 
     if IS_WINDOWS:
         # Task Scheduler has no "disable and remove"; deleting the task is both. A task that

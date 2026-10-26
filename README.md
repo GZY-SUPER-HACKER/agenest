@@ -59,7 +59,7 @@ process) that needs nothing but a provider key.
 
 | Layer | What works today |
 |---|---|
-| Coding agents (observed and driven) | Claude Code (hooks via `sdk/csd-agent`), DeepSeek Harness / `dsh` and standalone Pi (reporters wired by the same `csd-agent install`), Codex, or anything that can call `cpctl` from a wrapper |
+| Coding agents (observed and driven) | Claude Code (hooks), Codex (hooks), DeepSeek Harness / `dsh`, and standalone Pi — reporters wired by the same `csd-agent install` — or anything that can call `cpctl` from a wrapper |
 | Personal agents (the channel) | `native` — the built-in personal agent, **built on Pi** (`@earendil-works/pi-coding-agent`); nanobot; OpenClaw; Hermes Agent |
 
 The built-in `native` agent is a Pi process this service starts itself. **Pi is the agent loop;
@@ -194,6 +194,11 @@ cpctl event -m "Tests green" --payload "stage=testing,tests=42"
 # Blocked on a human? Say so — this is what puts the session under "needs attention",
 # and the next event of any kind clears it again.
 cpctl event --type awaiting_user -m "needs approval to run the migration"
+
+# A sentence the agent wrote while working — not a status, not a plan. `source` says where
+# it came from, so the page can never draw a machine fact as the agent's own words.
+cpctl event --type checkpoint -m "Now I'll add the cursor test" \
+  --payload '{"source":"prose","turn":3}'
 
 # 3. Finish with the real outcome
 cpctl session finish --status completed --summary "12 tests pass" --exit-code 0
@@ -785,6 +790,16 @@ connector reports `turn_completed` when a reply ends; the page shows **idle** wh
 stays `running`, and the next prompt (`progress`) clears it. A session that is open but not
 working is neither "running now" nor finished, so it gets its own count in the overview and
 its own filter chip in the rail.
+
+**A checkpoint is the agent's own sentence.** Between the prompt and the reply boundary there
+used to be nothing; `checkpoint` events fill that gap with text the agent wrote ("Now I'll add
+the cursor test") — one per stage, not one per tool call. `csd-agent` accumulates
+`MessageDisplay` and reports only when a later `PostToolBatch` proves a tool followed the
+message, so an answer is never mistaken for progress. Pi does the same with
+`turn_end.toolResults`; DSH uses `assistant/message` and turns its `todo/write` whole-list
+snapshot into a `source: "plan"` checkpoint. Codex's hooks expose no intermediate prose, so
+that reporter stays turn-level and sends none. A reporter with no prose surface sends none;
+the absence is honest. See design.md §37 and §38.
 
 **SSE is a notification, not a record.** The stream carries `id:` (a database event id) so a
 reconnecting client resumes with `?cursor=<id>`. A client that was away longer than the

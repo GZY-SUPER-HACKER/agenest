@@ -192,6 +192,12 @@ of your problems.
   `Stop` reports the reply boundary as an event, the UI shows `idle` while the status stays
   `running`, and the next `progress` event clears it. Never a sixth status, never a
   `session finish` (§36).
+- **A `checkpoint` is the agent's own sentence, not a summary we wrote.** The connector
+  accumulates `MessageDisplay` into `tracked.json` and reports it only when a later
+  `PostToolBatch` proves a tool followed it; `Stop` discards the rest, because that message is
+  the answer. Pi does the same with `turn_end.toolResults`. The payload's `source` says where
+  the sentence came from, the key is the agent's own message id, and a reporter with only a
+  final answer emits no checkpoints rather than inventing them (§37).
 - **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` but
   **not** `updated_at`, and is excluded from timelines and from `last_event`. Otherwise 40
   pings during a test run bury the last thing the user actually did.
@@ -254,12 +260,22 @@ of your problems.
   wires both agents; `dsh plugin add <checkout>` records a `link:` to the checkout and is not a
   deployment. `csd-agent dsh install|status|uninstall` is the same module without the Claude
   Code half, for a DSH-only host (§28).
+- **The Codex reporter is turn-level, and it never answers an approval.** Hooks are merged into
+  `$CODEX_HOME/hooks.json`; they carry session/turn boundaries, the prompt, and
+  `PermissionRequest`, but no intermediate prose (`postModelRequest` has status/usage only). It
+  emits no checkpoints. The hook returns **no decision** for an approval: Codex broadcasts the
+  request and the first answer wins, so a deny here would race the human. Auto-decline belongs
+  only to an owned/headless turn with `approvalPolicy: "never"`, which is what `codex exec`
+  does (§38).
 - **A Pi run is a session, and the native personal agent is the same binary — so it must stay
   inert.** `sdk/pi-csd-extension/csd-reporter.js` opens on `before_agent_start` and closes on
   `agent_settled` with `AssistantMessage.stopReason` (`turn_end` is only a progress line, never a
-  boundary). `native.py` sets `CSD_AGENT=1` on every Pi child it spawns, and the extension
-  registers nothing when it sees it; reporting those runs would show the Agent tab talking to
-  itself. The install is **one copied file** under `~/.pi/agent/extensions/` (global only — the
+  boundary). `native.py` sets `CSD_AGENT=1` **and** `CSD_AGENT_PARENT=<backend pid>` on every Pi
+  child it spawns, and the extension registers nothing only when the marker is present *and*
+  `process.ppid` matches — so the Agent tab does not report itself, while a `pi` run the personal
+  agent spawns (a coding run, inheriting the marker but with a different parent) does. Reporting
+  the former would show the Agent tab talking to itself; silencing the latter would make the
+  channel unable to drive the agent it was asked to drive. The install is **one copied file** under `~/.pi/agent/extensions/` (global only — the
   project-local directory is trust-gated), and uninstall deletes only a file carrying the
   reporter's marker. Diagnostics go to stderr because in `pi --print` stdout is the answer (§31).
 - **`csd-agent install` writes the long-lived pieces *the platform has*, not systemd's.** Linux:
