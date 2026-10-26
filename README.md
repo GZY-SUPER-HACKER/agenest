@@ -719,7 +719,8 @@ All under `/api`. Interactive docs at `/api/docs`.
 | `GET` | `/api/sessions` | read | List, running first; `?status=&agent=&limit=&offset=` |
 | `GET` | `/api/sessions/{id}` | read | Detail with recent events |
 | `PATCH` | `/api/sessions/{id}` | ingest | Update status / metadata / summary |
-| `POST` | `/api/sessions/{id}/close` | control | Mark a session interrupted by hand |
+| `POST` | `/api/sessions/{id}/close` | access | Mark a session interrupted by hand |
+| `POST` | `/api/sessions/{id}/dismiss` | access | Mark it read — it leaves needs-attention |
 | `POST` | `/api/sessions/{id}/events` | ingest | Report one event |
 | `GET` | `/api/sessions/{id}/events` | read | Event history, newest first |
 | `POST` | `/api/hosts` | ingest | Report a connected agent host, its disconnect, or that it may be driven |
@@ -819,6 +820,15 @@ projected onto the session as `last_verdict`, separately from `last_event`, beca
 `turn_completed` that follows an agent's own report would otherwise hide it. A completed run
 with a `task_failed` verdict sits under needs-attention, not finished; `task_completed` is the
 positive half and stays where it was. See design.md §40.
+
+**Needs-attention has an exit.** `failed` and `interrupted` rows used to offer nothing to click,
+and the ordinary source of `interrupted` is the connector closing a process that vanished — so
+the row asked for attention forever. `POST /api/sessions/{id}/dismiss` records that a person has
+read it. The row stores the newest event id at dismissal, so a report newer than the
+acknowledgement — typically a `task_failed` verdict that arrived after the run closed — asks
+again; a heartbeat does not, and there is no un-dismiss route because that is the way back. It
+moves no status, writes no event, and leaves `updated_at` alone; the session lands in *Finished*
+(or *Running*, if it is still open) rather than disappearing. See design.md §42.
 
 **SSE is a notification, not a record.** The stream carries `id:` (a database event id) so a
 reconnecting client resumes with `?cursor=<id>`. A client that was away longer than the

@@ -120,6 +120,14 @@ Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍�
 写着进程是怎么结束的。为了让 agent 报完 verdict 之后紧跟的 `turn_completed` 不把它盖掉，服务端
 单独投影了 `last_verdict`。见 [docs/design.md](docs/design.md) §40。
 
+needs attention 以前只能进不能出：`failed` / `interrupted` 的行没有任何可点的动作，而
+`interrupted` 最常见的来源恰恰是 connector 发现进程消失后自己写的。现在详情页可以 **Dismiss**——
+它表示"我看到了，这里没有我的事了"，记录的是人读过了，而不是任务结果，所以不改变 status、不写
+事件、也不动 `updated_at`。行会落到 Finished（仍在跑的回到 Running），并没有消失；而且服务端记的是
+"dismiss 时最新的事件 id"这种水印：之后任何更新的报告（比如关闭后才到的 `task_failed`）都会让它
+重新回到 needs attention，heartbeat 不会。Dismiss 是单向的——没有单独的撤回接口，因为更新的报告
+就是回来的路。见 [docs/design.md](docs/design.md) §42。
+
 要接入一个真实在跑的 agent，而不是手写上报：
 
 - **Claude Code**：用 `sdk/csd-agent`，一条命令安装 tunnel、存活探针和 hooks，见

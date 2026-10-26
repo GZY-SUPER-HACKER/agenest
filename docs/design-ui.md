@@ -240,6 +240,22 @@ agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 - 分区时 task-failed 从 running / idle / finished 里扣掉，保证 tile 仍然精确相加；
 - 状态胶囊不变：它说的是**进程怎么结束的**，verdict 说的是**活成没成**，两个事实都保留。
 
+### 退出 needs-attention 是一次人的动作
+
+needs-attention 原来是只进不出的：`failed` / `interrupted` 的行没有任何可点的动作，而 connector
+在进程消失时自己写下的 `interrupted` 会一直挂在最上面。详情页现在在时间线上方多一个安静的动作盒：
+
+- **Dismiss = "我看到了，这里没有我的事了"。** 它不改变 status，也不写事件；行本身还留在板上
+  （已结束的落进 Finished，仍在跑的回到 Running），状态胶囊照旧说 `interrupted`。
+- **单向，没有 undo，也没有确认框。** dismiss 过的会话不会再多一个 "Put back" 按钮：行还留在板上
+  （已结束的落进 Finished），而且任何比 dismiss 更新的报告都会自己把它放回 needs-attention——那个
+  自清除就是 undo，而且只在真正有意义的报告上触发。既然什么都没删、状态照旧可见，就不需要再弹一个
+  确认框。
+- **水印，不是开关。** 只有"比 dismiss 时更新"的报告才会让它重新进入 needs-attention；这正是
+  verdict 在 session 关闭之后才到达的那种顺序（docs/design.md §40）。所以一个被 dismiss 的仍在
+  运行的会话，下一条 `progress` 就会重新提出请求；而 heartbeat 不会——心跳是活着，不是干活。
+- **安静，不是警报。** 和 close box 同一种卡片形状、同一套 token：dismiss 是整理，不是一个红点。
+
 ## 附件：卡片，不是链接
 
 文件在对话里是**卡片**，不是一行带下划线的链接。卡片把三个问题一次答完：这是什么（名字 +

@@ -8,11 +8,11 @@ Auth split (spec 9, 6.1):
   is set. The deployment already sits behind a Tailscale ACL, so gating reads by default
   would mean typing a token on a phone for no gained security; the guard exists for the
   devices that connect from outside the tailnet.
-- `POST /{id}/close` requires the **access token** to be *configured* (403 while it is unset) —
-  the same credential as a read, because the page is one page (docs/design.md §22). It is
-  deliberately not the ingest token: the dashboard UI is served to anyone who loads the URL, so
-  a button in it must not be backed by the credential that writes events. See
-  `auth.access_header`.
+- `POST /{id}/close` and `POST /{id}/dismiss` require the **access token** to be *configured*
+  (403 while it is unset) — the same credential as a read, because the page is one page
+  (docs/design.md §22). They are deliberately not the ingest token: the dashboard UI is served
+  to anyone who loads the URL, so a button in it must not be backed by the credential that
+  writes events. See `auth.access_header`.
 
 `PATCH` returning 200 with an unchanged body is deliberate: a refused terminal override and
 a de-duplicated retry are both "nothing applied", and neither is an error (spec 6.4).
@@ -24,6 +24,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import access_header, dashboard_header, token_header
+from ..config import Settings
 from ..database import Database
 from ..schemas import (
     SessionCreate,
@@ -118,18 +119,38 @@ def patch_session(
     session_id: str,
     db: deps.DbDep,
     broker: deps.BrokerDep,
+    settings: deps.SettingsDep,
     data: SessionPatch,
 ) -> SessionOut:
     session, changed = ss.patch_session(db, session_id, data)
     if session is None:
         raise not_found(session_id)
 
+    # Projections are computed, not stored, so they have to be re-attached before the response
+    # leaves and before the frame is published — the client replaces its copy wholesale, and a
+    # missing `last_event` is a card's "what it is doing" line erased from the screen.
+    session = _projected_session(db, settings, session_id)
     if changed:
         # A patch that only touched metadata writes no event of its own, so the SSE frame is
         # anchored to the session's latest event id — a row the client already holds. A
         # refused terminal override applies nothing and therefore says nothing (spec 6.4).
         last = ss.get_last_event_row(db, session_id)
         broker.publish_session(session, after=last["id"] if last else -1)
+    return session
+
+
+def _projected_session(db: Database, settings: Settings, session_id: str) -> SessionOut:
+    """A session as a response or an SSE frame must carry it.
+
+    `possibly_stale`, `last_event`, `last_verdict` and `dismissed` are computed per response;
+    a route that wrote a row and returned the bare row would answer with them at their
+    defaults, and the list hook would then erase the real values on screen.
+    """
+    session = ss.get_session(
+        db, session_id, stale_after_seconds=settings.stale_after_seconds
+    )
+    assert session is not None
+    ss.attach_last_events(db, [session])
     return session
 
 
@@ -150,6 +171,7 @@ def close_session(
     session_id: str,
     db: deps.DbDep,
     broker: deps.BrokerDep,
+    settings: deps.SettingsDep,
 ) -> SessionOut:
     """Mark a session `interrupted` on a human's say-so.
 
@@ -169,6 +191,10 @@ def close_session(
 
     Idempotent and safe to repeat: terminal states are sticky and first-write-wins (§3), so
     closing an already-closed session applies nothing and returns the session unchanged.
+
+    Closing does **not** dismiss the row (§42). The two say different things — how it ended,
+    and whether a person has read it — and the row is often closed by the connector's liveness
+    check with nobody looking.
     """
     data = SessionPatch(
         status=SessionStatus.interrupted,
@@ -178,6 +204,44 @@ def close_session(
     if session is None:
         raise not_found(session_id)
 
+    session = _projected_session(db, settings, session_id)
+    if changed:
+        last = ss.get_last_event_row(db, session_id)
+        broker.publish_session(session, after=last["id"] if last else -1)
+    return session
+
+
+@router.post(
+    "/{session_id}/dismiss",
+    response_model=SessionOut,
+    dependencies=[Depends(access_header)],
+    summary="Take a session out of needs-attention",
+)
+def dismiss_session(
+    session_id: str,
+    db: deps.DbDep,
+    broker: deps.BrokerDep,
+    settings: deps.SettingsDep,
+) -> SessionOut:
+    """Record that a person has read this session and needs nothing further from it.
+
+    Needs-attention had no exit: `failed` and `interrupted` rows offer nothing to click, and
+    the ordinary way to get one is a connector closing a process that vanished, so the list
+    could only grow. This is that exit (docs/design.md §42).
+
+    It moves no status and executes nothing — the row still says how the run ended — and it
+    is **self-clearing**: the stored watermark is compared with the newest display event, so
+    a report newer than this acknowledgement asks for attention again. There is deliberately
+    no un-dismiss route (§42): a newer report is the way back, and the row never leaves the
+    board anyway.
+    """
+    session, changed = ss.dismiss_session(db, session_id)
+    if session is None:
+        raise not_found(session_id)
+
+    # `dismissed` is computed from the watermark and the newest event, so it has to be
+    # re-attached here for both the response and the frame (see `_projected_session`).
+    session = _projected_session(db, settings, session_id)
     if changed:
         last = ss.get_last_event_row(db, session_id)
         broker.publish_session(session, after=last["id"] if last else -1)

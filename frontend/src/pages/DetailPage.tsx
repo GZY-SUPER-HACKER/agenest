@@ -18,6 +18,7 @@ import { useState } from "react";
 
 import {
   closeSession,
+  dismissSession,
   isUnauthorized,
   useSessionDetail,
 } from "../api/client";
@@ -31,6 +32,7 @@ import {
   isIdle,
   isTaskCompleted,
   isTaskFailed,
+  needsAttention,
   relativeTime,
   statusLabel,
 } from "../lib/format";
@@ -218,6 +220,21 @@ export function DetailPage({
         <CloseAction sessionId={detail.id} onClosed={() => void reload()} />
       )}
 
+      {/*
+        Needs attention had no exit: `failed` and `interrupted` rows offer nothing to act on,
+        and the connector writes `interrupted` itself when a process vanishes, so the row could
+        ask forever. This is the reader's answer — and it is offered for anything that is
+        currently asking, including a running session that is blocked on you (docs/design.md
+        §42).
+      */}
+      {needsAttention(detail) && (
+        <DismissAction
+          sessionId={detail.id}
+          dismissed={detail.dismissed}
+          onDismissed={() => void reload()}
+        />
+      )}
+
       <section className="timeline">
         <div className="timeline__head">
           <span className="timeline__l">Timeline</span>
@@ -303,6 +320,70 @@ function CloseAction({
           {busy ? "Closing…" : "Close session"}
         </button>
       </div>
+
+      {problem && <p className="closebox__problem">{problem}</p>}
+    </section>
+  );
+}
+
+/**
+ * Dismiss a session from needs-attention (docs/design.md §42).
+ *
+ * Needs attention is a list of decisions, and for `failed` / `interrupted` there was nothing
+ * to act on: an ended session never reports anything new, so the row could only accumulate.
+ * Closing records *how the run ended*; this records that a person has *read* it. Different
+ * facts, and the second one must not be written into the status.
+ *
+ * **One-way on purpose.** There is no "put it back" button: the row never leaves the board (it
+ * joins Finished, or Running while it is still open), and any report newer than the
+ * acknowledgement already returns it to needs-attention by itself. A second control for a case
+ * the board can express on its own is surface without a job. That is also why there is no
+ * confirmation dialog: nothing is deleted, and the state is not hidden.
+ */
+function DismissAction({
+  sessionId,
+  dismissed,
+  onDismissed,
+}: {
+  sessionId: string;
+  dismissed: boolean;
+  onDismissed: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const dismiss = async () => {
+    setBusy(true);
+    setProblem(null);
+    try {
+      await dismissSession(sessionId);
+      onDismissed();
+    } catch (exc) {
+      setProblem(
+        isUnauthorized(exc) ? "That token was not accepted." : exc instanceof Error ? exc.message : String(exc),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="closebox">
+      <p className="closebox__why">
+        {dismissed
+          ? "Dismissed — this session is out of Needs attention. Anything the agent reports " +
+            "after the dismissal puts it back."
+          : "Seen it? Dismissing clears this from Needs attention without changing how the " +
+            "session ended. The entry stays on the board, and a newer report would ask again."}
+      </p>
+
+      {!dismissed && (
+        <div className="closebox__form">
+          <button className="closebox__btn" disabled={busy} onClick={() => void dismiss()}>
+            {busy ? "Dismissing…" : "Dismiss from Needs attention"}
+          </button>
+        </div>
+      )}
 
       {problem && <p className="closebox__problem">{problem}</p>}
     </section>

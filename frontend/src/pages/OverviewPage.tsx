@@ -21,6 +21,10 @@
  * buckets makes the numbers stop adding up. A task-failed session works the same way even when
  * its status says `completed` — it is drawn under attention and *not* under finished.
  *
+ * A dismissed session falls through to Finished (or to Running, if it is still open): the
+ * reader has answered the request for attention, and the row is history rather than a problem.
+ * It is still one bucket, so the arithmetic holds (docs/design.md §42).
+ *
  * When nothing needs attention the page says so in one line instead of padding the screen
  * with green checkmarks.
  */
@@ -28,7 +32,7 @@
 import { useState } from "react";
 
 import { IconCheck, IconChevronRight, IconFolder } from "../components/icons";
-import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskCompleted, isTaskFailed, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskCompleted, isTaskFailed, relativeTime, sessionBucket } from "../lib/format";
 import type { Session } from "../types/api";
 
 export function OverviewPage({
@@ -40,42 +44,26 @@ export function OverviewPage({
 }) {
   const [showFinished, setShowFinished] = useState(false);
 
-  // Waiting first, and gated on `running` inside `isAwaitingUser` so a late notification
-  // cannot park a finished session here.
-  const awaiting = sessions.filter(isAwaitingUser);
   /*
-    The work failed even though the run may have ended cleanly. Read off the newest event, not
-    off `status`, because verification commonly lands after `session_completed` — see
-    `isTaskFailed`. Listed before `broken` and excluded from it so one session is not drawn
-    twice (the events are mutually exclusive, the statuses are not).
-  */
-  const taskFailed = sessions.filter(isTaskFailed);
-  const broken = sessions.filter((s) => s.status === "failed" && !isTaskFailed(s));
-  const interrupted = sessions.filter(
-    (s) => s.status === "interrupted" && !isTaskFailed(s),
-  );
-  /*
-    `idle` is a reported display state, not a status (§36): the agent finished its last reply
-    and the process is still open. It is taken out of "running" here even though the status
-    column still says `running`, because this page answers "where does the work stand" — and
-    a session that is not working does not belong under "Running now". It is also not
-    "finished": nothing ended.
-  */
-  const idle = sessions.filter(isIdle);
-  const running = sessions.filter(
-    (s) => isBusy(s) && !isAwaitingUser(s) && !isIdle(s) && !isTaskFailed(s),
-  );
-  const finished = sessions.filter(
-    (s) =>
-      (s.status === "completed" || s.status === "unknown") && !isTaskFailed(s),
-  );
+    One bucket per session, and the rule lives in `sessionBucket` because the detail page asks
+    the same "does this need attention" question. The tile row depends on this being a
+    partition: every session lands in exactly one of the four, so the numbers add up.
 
-  const needsAttention = [...awaiting, ...taskFailed, ...broken, ...interrupted];
+    A dismissed session is not gone — it fell through to Finished (or back to Running, if it
+    is still open). See design.md §42.
+  */
+  const attention = sessions.filter((s) => sessionBucket(s) === "attention");
+  const running = sessions.filter((s) => sessionBucket(s) === "running");
+  const idle = sessions.filter((s) => sessionBucket(s) === "idle");
+  const finished = sessions.filter((s) => sessionBucket(s) === "finished");
+
   // Red when something actually ended badly — a failed task counts, even if the process
   // exited 0. A board whose only problem is a session waiting on an answer is not in a bad
-  // state — it is waiting on you, which is amber.
-  const endedBadly =
-    taskFailed.length + broken.length + interrupted.length > 0;
+  // state — it is waiting on you, which is amber. Dismissed rows are not in this list, because
+  // a person has already said the board no longer has a problem there.
+  const endedBadly = attention.some(
+    (s) => isTaskFailed(s) || s.status === "failed" || s.status === "interrupted",
+  );
 
   return (
     <div className="overview">
@@ -85,19 +73,19 @@ export function OverviewPage({
             row is "where does the work stand", not a fixed dashboard skeleton. */}
         {idle.length > 0 && <Stat n={idle.length} label="Idle" />}
         <Stat
-          n={needsAttention.length}
+          n={attention.length}
           label="Needs attention"
-          tone={endedBadly ? "dead" : awaiting.length > 0 ? "warn" : undefined}
+          tone={endedBadly ? "dead" : attention.some(isAwaitingUser) ? "warn" : undefined}
         />
         <Stat n={finished.length} label="Finished" />
         <Stat n={sessions.length} label="Total sessions" />
       </div>
 
-      {needsAttention.length > 0 && (
+      {attention.length > 0 && (
         <>
           <p className="section-label">Needs attention</p>
           <div className="cards cards--attention">
-            {needsAttention.map((session) => (
+            {attention.map((session) => (
               <SessionCard key={session.id} session={session} onOpen={onOpen} />
             ))}
           </div>
@@ -115,7 +103,7 @@ export function OverviewPage({
         </>
       ) : (
         idle.length === 0 &&
-        needsAttention.length === 0 && <AllClear />
+        attention.length === 0 && <AllClear />
       )}
 
       {idle.length > 0 && (

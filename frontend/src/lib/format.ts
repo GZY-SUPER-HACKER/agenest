@@ -163,6 +163,49 @@ export function isTaskCompleted(session: Session): boolean {
   return visibleVerdict(session)?.event_type === "task_completed";
 }
 
+/**
+ * Does this session belong under **needs attention**?
+ *
+ * Four reports, and every one of them asks a human to decide something: the agent is blocked
+ * on an answer (`awaiting_user`), a verdict says the work failed, the run failed, or the run
+ * was interrupted with no outcome reported. A task-failed session counts regardless of
+ * `status` — a completed run that failed the task is the ordinary shape (design.md §40).
+ *
+ * `dismissed` is deliberately **not** part of the predicate: it is the reader's answer to the
+ * question, not the question. Keeping them apart is what lets the detail page still say "this
+ * asks for attention, and you have dismissed it".
+ */
+export function needsAttention(session: Session): boolean {
+  return (
+    isAwaitingUser(session) ||
+    isTaskFailed(session) ||
+    session.status === "failed" ||
+    session.status === "interrupted"
+  );
+}
+
+export type SessionBucket = "attention" | "running" | "idle" | "finished";
+
+/**
+ * Where the overview draws a session. **Exactly one bucket per session**, which is what keeps
+ * the tile row adding up to the total (running + idle + attention + finished = sessions).
+ *
+ * The order of the questions is the rule:
+ *
+ * 1. Attention outranks idle. A task-failed session whose last reply also ended is asking for
+ *    a decision, and "the reply ended" is not an answer to it.
+ * 2. A *dismissed* attention item falls through rather than vanishing. Ended, it joins
+ *    Finished — the history disclosure, with its status pill still saying `interrupted` or
+ *    `failed`. Still running, it joins Running, because that is still the truth about it; it
+ *    is only the request for attention that a person has answered (design.md §42).
+ */
+export function sessionBucket(session: Session): SessionBucket {
+  if (needsAttention(session) && !session.dismissed) return "attention";
+  if (isIdle(session)) return "idle";
+  if (isBusy(session)) return "running";
+  return "finished";
+}
+
 /** The status a person should read. `idle` is a reported display state, not a status. */
 export function statusLabel(session: Session): string {
   return isIdle(session) ? "idle" : STATUS_LABEL[session.status];

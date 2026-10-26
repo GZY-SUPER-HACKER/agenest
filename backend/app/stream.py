@@ -81,6 +81,10 @@ def session_frame(session: SessionOut) -> dict:
                 if session.last_verdict is not None
                 else None
             ),
+            # A projection, not a stored flag (docs/design.md §42): the frame has to carry it
+            # or the list hook's wholesale replacement puts a dismissed row back on the board
+            # on the very frame that announced the dismissal.
+            "dismissed": session.dismissed,
         },
     }
 

@@ -71,6 +71,15 @@ export interface Session {
    * display decision — see `isTaskFailed` in `lib/format.ts`.
    */
   last_verdict: SessionEvent | null;
+  /**
+   * A person has read this session and needs nothing further from it (design.md §42).
+   *
+   * A **display projection**, like `possibly_stale`, not a stored flag or a status: the server
+   * compares the recorded dismissal watermark with the newest event, so a report that lands
+   * after the acknowledgement asks for attention again. It moves no status — the row still
+   * says how the run ended.
+   */
+  dismissed: boolean;
 }
 
 export interface SessionDetail extends Session {

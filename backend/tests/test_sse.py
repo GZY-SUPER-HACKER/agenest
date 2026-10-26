@@ -196,6 +196,7 @@ def test_session_frame_carries_every_field_the_client_type_declares() -> None:
         started_at="t", last_activity_at="t", created_at="t", updated_at="t",
         last_event=event,
         last_verdict=verdict,
+        dismissed=True,
     )
     payload = session_frame(session)["session"]
     assert payload["last_event"]["event_type"] == "awaiting_user"
@@ -205,6 +206,9 @@ def test_session_frame_carries_every_field_the_client_type_declares() -> None:
     # to the "no host recorded" group on the very event that updated it.
     assert payload["host"] == "lab-box"
     assert payload["created_at"] == "t"
+    # §42: a dismissal that is not in the frame is a dismissal the list hook puts back on the
+    # board, because it replaces its copy wholesale.
+    assert payload["dismissed"] is True
 
 
 # --------------------------------------------------------------------------- #
