@@ -21,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.responses import Response
+from starlette.types import Scope
 
 from .agent import endpoints, hosts_view
 from .agent.backends import AgentBackend
@@ -35,6 +37,29 @@ from .database import Database, init_database
 from .stream import AgentBroker, Broker, init_broker
 
 logger = logging.getLogger("csd")
+
+
+class _ShellStaticFiles(StaticFiles):
+    """The built shell: unhashed names revalidate, hashed assets are immutable.
+
+    See `_mount_static` for why the header matters. Anything under `assets/` carries the build
+    in its name, so it can never be stale; everything else (`sw.js`, the manifest, the icons)
+    keeps a stable name across deploys and must be revalidated — including the service worker,
+    which is what lets a phone notice a release at all.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            # `path` is filesystem-shaped: `assets\\x.js` on a Windows test run, `/` on the
+            # deployed host. Normalise before deciding, or the policy depends on the platform.
+            normalised = path.replace("\\", "/").lstrip("/")
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable"
+                if normalised.startswith("assets/")
+                else "no-cache"
+            )
+        return response
 
 
 def create_app(
@@ -168,6 +193,14 @@ def _mount_static(app: FastAPI, settings: Settings) -> None:
 
     `.webmanifest` is not in Python's MIME table on every platform, and a browser refuses a
     manifest served as `application/octet-stream`, so register it explicitly.
+
+    **The cache policy is part of the contract, and its absence was a bug.** With no
+    `Cache-Control`, a browser is free to cache a response heuristically — and an installed
+    home-screen app has an HTTP cache of its own. That is how a deploy reached a fresh browser
+    tab immediately while the app on the phone kept a previous build for days: the service
+    worker's network-first navigation cannot help, because `fetch()` may be answered from the
+    same stale HTTP cache. So `/` and every unhashed file (`sw.js`, the manifest, the icons)
+    revalidate; `assets/` is immutable, because Vite puts the build in the file name.
     """
     static = settings.static_dir
     if static is None or not static.is_dir():
@@ -181,9 +214,9 @@ def _mount_static(app: FastAPI, settings: Settings) -> None:
 
     @app.get("/", include_in_schema=False)
     async def index_page() -> FileResponse:
-        return FileResponse(index)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
-    app.mount("/", StaticFiles(directory=static), name="static")
+    app.mount("/", _ShellStaticFiles(directory=static), name="static")
 
 
 def _add_error_handlers(app: FastAPI) -> None:

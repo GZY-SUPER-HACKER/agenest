@@ -17,7 +17,10 @@
  * by Vite, and the shell list is the handful of stable URLs that exist in every build.
  */
 
-const CACHE = "csd-shell-v1";
+// Bumped when the shell's own rules change. `activate` deletes every other cache, so the bump
+// is how a previous build's HTML and icons stop occupying the app's storage — the hashed
+// assets are already separated by name, which is why an ordinary deploy does not need one.
+const CACHE = "csd-shell-v2";
 const SHELL = ["./", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", (event) => {

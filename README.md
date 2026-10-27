@@ -979,7 +979,10 @@ change there; it treats *reachability* as the verdict, because rule inspection o
 
 `npm run build` emits a PWA: `manifest.webmanifest`, icons under `icons/`, and `sw.js`. The
 service worker caches **only the app shell** — `/api` is excluded, so the data is always live or
-absent — and it registers only in a production build, never under the Vite dev server.
+absent — and it registers only in a production build, never under the Vite dev server. The shell
+and the worker are served with `Cache-Control: no-cache` while `/assets/*` is immutable, so a
+deploy cannot sit in a phone's HTTP cache; an installed app reloads once when a new worker takes
+control. An app installed before that policy existed may need to be closed fully once.
 
 - iOS: Safari → Share → **Add to Home Screen**
 - Android/Chrome: the install prompt, or ⋮ → **Install app**
