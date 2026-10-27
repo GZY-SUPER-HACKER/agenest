@@ -142,10 +142,14 @@ export default function App() {
     if (window.matchMedia("(max-width: 760px)").matches) setRailState("collapsed");
   }, [setRailState]);
 
+  /**
+   * Back to the board. It deliberately leaves the rail alone: on a phone the rail is an
+   * overlay drawer, and expanding it here put the session list on top of the overview the
+   * user had just asked to see. The drawer has its own button; going back is not it.
+   */
   const goOverview = useCallback(() => {
     window.location.hash = "#/";
-    if (window.matchMedia("(max-width: 760px)").matches) setRailState("expanded");
-  }, [setRailState]);
+  }, []);
 
   const selectTab = useCallback(
     (tab: AppTab) => {
