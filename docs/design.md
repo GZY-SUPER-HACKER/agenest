@@ -1649,6 +1649,27 @@ catch-all cannot shadow them; `StaticFiles` resolves every path inside its direc
 traversal surface is unchanged. `.webmanifest` is registered as `application/manifest+json`
 explicitly — a browser refuses a manifest served as `application/octet-stream`.
 
+### The HTTP cache is part of "a deploy reaches the phone"
+
+The worker's network-first navigation was not enough, because it is one cache above another.
+With no `Cache-Control`, a browser may keep a response fresh *heuristically*, and an installed
+home-screen app has an HTTP cache of its own — so a release reached a fresh browser tab on the
+laptop while the app on the phone kept the previous build for days. The worker cannot rescue
+that: its `fetch()` is allowed to be answered from the same stale cache. The visible symptom was
+a new control (Dismiss) that existed everywhere except the installed app.
+
+So the server states the policy. `/` and every unhashed file — `sw.js`, the manifest, the
+icons — are `Cache-Control: no-cache`, which means "revalidate", not "do not store". `assets/`
+is `public, max-age=31536000, immutable`, because Vite puts the build in the file name. The
+worker registration passes `updateViaCache: "none"` for the same reason at the worker-script
+level, and the page reloads **once** when a new worker takes control: `clients.claim()` swaps
+the controller but does not re-execute the JavaScript already on the page, so an open app would
+otherwise keep running the old bundle until it was force-quit.
+
+The floor is one relaunch: a page already running a previous bundle has no handler for the new
+worker's activation. An app installed before this policy existed may keep its old HTTP-cache
+entry until it is closed fully once; after that, revalidation is what keeps it current.
+
 Rejected: a WebView shell. It buys background push and store distribution, neither of which is in
 scope, at the cost of a second build, signing, review, and a push path that would contradict §1
 more directly than the agent's own `ssh` already does. The worker is registered only in a

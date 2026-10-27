@@ -628,6 +628,11 @@ rather than `EventSource` and `?token=`, because the routes behind it can execut
   from `frontend/public/`; `_mount_static` serves the whole `dist/` (API routes are registered
   first), and `.webmanifest` gets `application/manifest+json` explicitly because Python's MIME
   table does not know it on every platform. Source art lives in `images/`.
+- **The static mount owns the HTTP cache policy: `/` and every unhashed file revalidate, `assets/`
+  is immutable.** Without `Cache-Control` a phone's own HTTP cache can keep the shell for days,
+  and the worker's network-first navigation cannot help — `fetch()` is answered from that same
+  cache (this is how a new control was missing only in the installed app). The worker registers
+  with `updateViaCache: "none"` and reloads once when a new worker claims the page (§27).
 
 `AgentPage` stays mounted while the dashboard is showing (hidden, not unmounted) so a run keeps
 streaming while you look at the sessions it is changing, and the tab bar can show a live dot.
