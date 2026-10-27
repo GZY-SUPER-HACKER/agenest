@@ -25,10 +25,10 @@ from `codex-rs/hooks/schema/generated/*.command.input.schema.json`.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from . import runtime, tracked
+from .payload import read_stdin
 from . import host as host_report
 from .hooks import _first_line, _host_label, _is_system_message, _log, _now
 
@@ -234,7 +234,7 @@ IGNORED = {
 def run(event: str | None = None, raw: str | None = None) -> int:
     """Dispatch one Codex hook invocation. Always returns 0 — see the module docstring."""
     try:
-        text = raw if raw is not None else sys.stdin.read()
+        text = raw if raw is not None else read_stdin()
         payload = json.loads(text) if text.strip() else {}
         if not isinstance(payload, dict):
             payload = {}

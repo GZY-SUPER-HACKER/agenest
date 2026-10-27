@@ -2503,3 +2503,38 @@ most are written by the connector's liveness check, with no human present to hav
 Rejected: **persisting `dismissed` as a boolean.** Then a dismissal would silently outlive every
 later report, including the verdict that arrives after close; the watermark is what makes the
 action expire at exactly the right moment.
+
+
+## 43. A hook payload is UTF-8, and stdin is not
+
+The Claude Code adapter read its payload with `sys.stdin.read()`. On Windows that text wrapper
+decodes with the ANSI code page — GBK on the machine this was found on — *and* with
+`surrogateescape`, while the payload on the wire is UTF-8. A Chinese prompt therefore arrived
+at `UserPromptSubmit` as mojibake and, whenever the UTF-8 bytes did not happen to form valid
+GBK pairs, as lone surrogates.
+
+None of the consequences were cosmetic:
+
+- `PATCH /api/sessions/{id}` was refused by pydantic (a lone surrogate is not a valid string),
+  and because FastAPI's own 422 body echoes the offending value, encoding *that* raised
+  `UnicodeEncodeError` — so the client saw a **500** and the title never changed. Every session
+  on that host kept the placeholder `Claude Code · <project>` for its whole life.
+- The `progress` event built from the same prompt failed with it, so the timeline of a
+  long-living interactive session had only the turn boundaries.
+- `MessageDisplay` raised the same error while writing `tracked.json`, losing checkpoints.
+
+`SessionStart` and `SessionEnd` kept working because their payloads carry a `cwd` and an id, not
+prose — which is why the failure read as "names don't show" instead of "reporting is broken",
+and why it survived several rounds of looking at the reporter.
+
+The payload's encoding is a property of the wire format, so `csd_agent.payload.read_stdin()`
+decodes `sys.stdin.buffer` as UTF-8 (`errors="replace"`) at the point it is read. Both the
+Claude Code and Codex dispatchers use it.
+
+Rejected: **`PYTHONUTF8=1` / `PYTHONIOENCODING` in the launcher.** It fixes the processes that
+go through the launcher and silently stops fixing the ones that do not (a test, a direct
+`python -m csd_agent hook`), and it changes how every *other* stream in the process is decoded
+to fix one. Rejected: **`errors="surrogateescape"`.** It preserves the bytes and guarantees the
+server rejects them again; the point is to stop producing surrogates at all. A genuinely
+corrupt payload should say so (U+FFFD), not smuggle invalid Unicode into a title.
+
