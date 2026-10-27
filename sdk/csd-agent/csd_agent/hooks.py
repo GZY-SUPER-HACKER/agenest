@@ -87,10 +87,10 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 from . import config, runtime, tracked
+from .payload import read_stdin
 
 #: Long enough for a real task description, short enough not to wrap on a phone.
 MAX_TITLE = 68
@@ -475,7 +475,7 @@ IGNORED = {
 def run(event: str | None, raw: str | None = None) -> int:
     """Dispatch one hook invocation. Always returns 0 — see the module docstring."""
     try:
-        text = raw if raw is not None else sys.stdin.read()
+        text = raw if raw is not None else read_stdin()
         payload = json.loads(text) if text.strip() else {}
         if not isinstance(payload, dict):
             payload = {}

@@ -9,6 +9,7 @@ server (docs/design.md §35). Dropping it on the failure path is how one PATCH t
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import threading
@@ -20,7 +21,7 @@ SDK = Path(__file__).resolve().parents[2] / "sdk" / "csd-agent"
 if str(SDK) not in sys.path:
     sys.path.insert(0, str(SDK))
 
-from csd_agent import hooks, runtime, tracked  # noqa: E402  (the path insert has to come first)
+from csd_agent import hooks, payload, runtime, tracked  # noqa: E402  (the path insert has to come first)
 
 
 def entry() -> tracked.Tracked:
@@ -170,6 +171,44 @@ def test_a_system_message_never_becomes_the_session_title(monkeypatch) -> None:
     assert stored[-1].turn == 3
     # The tag decides, not the words: a prompt that merely mentions one is still a prompt.
     assert hooks._is_system_message("explain <task-notification>") is False
+
+
+def test_a_utf8_prompt_is_not_decoded_with_the_console_codec(monkeypatch) -> None:
+    """The payload is UTF-8; `sys.stdin` on Windows is the ANSI code page + surrogateescape.
+
+    Reading it through the text wrapper turned a Chinese prompt into mojibake, and — for UTF-8
+    byte pairs that are not valid GBK — into lone surrogates. The API rejects those, and
+    encoding its own 422 body raised, so the client saw a 500: every session on the affected
+    host kept the `Claude Code · <project>` placeholder forever (docs/design.md §43).
+    """
+    raw = '{"session_id": "cc-1", "prompt": "你好世界"}'.encode("utf-8")
+    # The Windows shape, reproduced exactly: GBK with surrogateescape over UTF-8 bytes.
+    fake = io.TextIOWrapper(io.BytesIO(raw), encoding="gbk", errors="surrogateescape")
+    monkeypatch.setattr(sys, "stdin", fake)
+
+    assert payload.read_stdin() == '{"session_id": "cc-1", "prompt": "你好世界"}'
+
+
+def test_a_chinese_prompt_names_the_session(monkeypatch) -> None:
+    """The title that reaches `cpctl` must be text the API can store."""
+    raw = '{"session_id": "cc-1", "prompt": "修复这个登录 bug"}'.encode("utf-8")
+    fake = io.TextIOWrapper(io.BytesIO(raw), encoding="gbk", errors="surrogateescape")
+    monkeypatch.setattr(sys, "stdin", fake)
+
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: entry() if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", lambda _entry: None)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="ok\n"))[1],
+    )
+
+    assert hooks.run("UserPromptSubmit") == 0
+
+    title_call, progress_call = calls[0], calls[1]
+    assert title_call[title_call.index("--title") + 1] == "修复这个登录 bug"
+    assert progress_call[progress_call.index("-m") + 1] == "Turn 1: 修复这个登录 bug"
 
 
 def pending_entry() -> tracked.Tracked:

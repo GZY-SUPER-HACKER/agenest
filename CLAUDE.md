@@ -304,6 +304,12 @@ of your problems.
   when there is more than one rather than guessing. `--url` installs skip the tunnel for a
   dashboard that is already published; it is not the default, because a public TLS handshake can
   exceed the hook wrapper's 2 s budget.
+- **A hook payload is UTF-8, so the dispatcher decodes `sys.stdin.buffer`, never `sys.stdin`.**
+  On Windows the text wrapper is the ANSI code page with `surrogateescape`: a Chinese prompt
+  became mojibake or lone surrogates, the title `PATCH` was rejected — and the 422 body's own
+  encoding failed, so the client saw a 500 — and `tracked.json` could not be written. Titles
+  never updated while session start/end kept working, because those payloads carry no prose
+  (§43).
 
 ### The credentials, and why their defaults differ
 
