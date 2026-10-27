@@ -313,8 +313,10 @@ of your problems.
 - **A session's name comes from its first real prompt, and only that one.** Every later prompt
   is a `Turn N:` line, not a rename: a row that changes name each time you speak cannot be
   recognised. `tracked.title` carries the name across a `--resume` and retries it after a
-  failed report. Claude Code 2.1.x omits `session_title` from its payloads, and its local
-  registry name is cwd-derived, so neither is consumed (§39).
+  failed report. A conversation's entry is **kept** after `SessionEnd` (`ended_at`) so a window
+  reload that resumes it opens a new row with the same name; the heartbeat skips ended entries
+  and `prune()` ages them out after a day. Claude Code 2.1.x omits `session_title` from its
+  payloads, and its local registry name is cwd-derived, so neither is consumed (§39).
 
 ### The credentials, and why their defaults differ
 

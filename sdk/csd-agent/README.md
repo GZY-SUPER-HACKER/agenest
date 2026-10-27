@@ -397,6 +397,12 @@ interactive session's timeline held exactly one line. The turn number comes from
 and is part of the message because `cpctl` derives its idempotency key from the message — two
 turns whose prompts read the same ("continue") must still be two rows.
 
+`SessionEnd` does not forget the conversation. The entry is kept, marked ended, because an
+editor restarts the Claude process on a window reload and resumes the same conversation seconds
+later: the old row is terminal, so the resume opens a new one — and that row is created with the
+stored name and turn count rather than waiting for a prompt after the reload. The heartbeat
+skips ended entries (already reported) and prunes them after a day.
+
 A message the harness injects is **not** a prompt. A finished background task arrives on
 `UserPromptSubmit` as a user-role message wrapped in `<task-notification>`, and a context
 reminder as `<system-reminder>`; naming the session after either is how rows called
