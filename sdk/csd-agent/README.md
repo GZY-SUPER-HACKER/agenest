@@ -310,7 +310,7 @@ delivered, the entry is kept and retried rather than forgotten.
 | Event | Action |
 |---|---|
 | `SessionStart` | create the session, or reuse it on `--resume`; close any dead session in the same directory |
-| `UserPromptSubmit` | replace the placeholder title, and report `Turn N: <prompt>` as a `progress` event; a harness-injected message (e.g. `<task-notification>`) does neither (§39) |
+| `UserPromptSubmit` | name the session from the **first** real prompt, and report `Turn N: <prompt>` as a `progress` event; a harness-injected message (e.g. `<task-notification>`) does neither (§39) |
 | `MessageDisplay` | accumulate the assistant text in `tracked.json`; report nothing yet |
 | `PostToolBatch` | report the accumulated sentence as a `checkpoint` |
 | `Notification` | report an `awaiting_user` event — Claude Code saying it wants a human |
@@ -388,12 +388,14 @@ call; the full argument is `docs/design.md` §37.
 
 ### A prompt is progress
 
-`UserPromptSubmit` reports `Turn N: <first line of the prompt>` as a `progress` event, beside
-updating the title. With the per-tool hooks off, that is the only "working on X" signal the
-connector has between `SessionStart` and `Stop`, and without it an interactive session's
-timeline held exactly one line. The turn number comes from `tracked.json` and is part of the
-message because `cpctl` derives its idempotency key from the message — two turns whose prompts
-read the same ("continue") must still be two rows.
+`UserPromptSubmit` reports `Turn N: <first line of the prompt>` as a `progress` event, and the
+**first** such prompt also names the session. Later prompts never rename it: a row whose name
+changes every time you say something cannot be recognised, and the latest prompt is already on
+the card as the `Turn N:` line. With the per-tool hooks off, that progress event is the only
+"working on X" signal the connector has between `SessionStart` and `Stop`, and without it an
+interactive session's timeline held exactly one line. The turn number comes from `tracked.json`
+and is part of the message because `cpctl` derives its idempotency key from the message — two
+turns whose prompts read the same ("continue") must still be two rows.
 
 A message the harness injects is **not** a prompt. A finished background task arrives on
 `UserPromptSubmit` as a user-role message wrapped in `<task-notification>`, and a context

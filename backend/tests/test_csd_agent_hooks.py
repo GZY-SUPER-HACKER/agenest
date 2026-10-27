@@ -173,6 +173,79 @@ def test_a_system_message_never_becomes_the_session_title(monkeypatch) -> None:
     assert hooks._is_system_message("explain <task-notification>") is False
 
 
+def test_only_the_first_prompt_names_the_session(monkeypatch) -> None:
+    """The name is what you recognise the row by; the latest prompt is the `Turn N:` line.
+
+    Renaming on every prompt made one session appear under a different name each time the
+    user said anything — and the timeline already answered "what is it doing now". Claude Code
+    sends no generated title in its hook payloads (2.1.x: `session_title` is in the schema but
+    omitted), so the first real prompt is the name the conversation gets.
+    """
+    calls: list[tuple[str, ...]] = []
+    current = entry()
+    monkeypatch.setattr(tracked, "get", lambda cc_id: current if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", lambda _entry: None)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="ok\n"))[1],
+    )
+
+    hooks.on_user_prompt({"session_id": "cc-1", "prompt": "fix the flaky test"})
+    hooks.on_user_prompt({"session_id": "cc-1", "prompt": "now update the docs"})
+
+    titles = [c[c.index("--title") + 1] for c in calls if c[:2] == ("session", "update")]
+    assert titles == ["fix the flaky test"]
+
+    progress = [c[c.index("-m") + 1] for c in calls if c[:2] == ("event", "--session")]
+    assert progress == ["Turn 1: fix the flaky test", "Turn 2: now update the docs"]
+
+
+def test_a_failed_title_update_is_retried_on_the_next_prompt(monkeypatch) -> None:
+    """A dashboard that was down when the first prompt arrived is not a permanent placeholder.
+
+    `entry.title` is only recorded after the report lands, so the next prompt tries again.
+    """
+    calls: list[tuple[str, ...]] = []
+    # The first prompt's title update fails; everything after it succeeds.
+    results = [runtime.Result(False, detail="HTTP Error 500")]
+    current = entry()
+    monkeypatch.setattr(tracked, "get", lambda cc_id: current if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", lambda _entry: None)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (
+            calls.append(args),
+            results.pop(0) if results else runtime.Result(True, stdout="ok\n"),
+        )[1],
+    )
+
+    hooks.on_user_prompt({"session_id": "cc-1", "prompt": "first try"})
+    assert current.title == ""
+
+    hooks.on_user_prompt({"session_id": "cc-1", "prompt": "second try"})
+
+    titles = [c[c.index("--title") + 1] for c in calls if c[:2] == ("session", "update")]
+    assert titles == ["first try", "second try"]
+    assert current.title == "second try"
+
+
+def test_a_resumed_session_keeps_its_name(monkeypatch) -> None:
+    """`--resume` re-fires `SessionStart`; the name must survive it, not be re-derived."""
+    named = entry()
+    named.title = "fix the flaky test"
+    stored: list[tracked.Tracked] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: named if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(tracked, "find_cc_pid", lambda: 1234)
+    monkeypatch.setattr(hooks.runtime, "cpctl", lambda *args: runtime.Result(True, stdout="ok\n"))
+
+    hooks.on_session_start({"session_id": "cc-1", "cwd": "/work", "source": "resume"})
+
+    assert stored and stored[-1].title == "fix the flaky test"
+
+
 def test_a_utf8_prompt_is_not_decoded_with_the_console_codec(monkeypatch) -> None:
     """The payload is UTF-8; `sys.stdin` on Windows is the ANSI code page + surrogateescape.
 
