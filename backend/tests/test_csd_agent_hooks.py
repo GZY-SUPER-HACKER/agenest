@@ -81,15 +81,80 @@ def test_a_failed_session_end_keeps_the_entry_tracked(quiet_log, monkeypatch) ->
     assert dropped == []
 
 
-def test_a_reported_session_end_drops_the_entry(monkeypatch) -> None:
-    dropped: list[str] = []
+def test_a_reported_session_end_keeps_the_entry_ended(monkeypatch) -> None:
+    """The entry is **not** dropped: a window reload resumes the conversation seconds later.
+
+    The old row is terminal and stays so, but the next `SessionStart` creates a new row for the
+    same conversation — and it needs the stored name, or the first prompt after the reload
+    becomes the name. `ended_at` is what tells the heartbeat to skip a row already reported
+    closed, and `prune()` ages the entry out after a day.
+    """
+    stored: list[tracked.Tracked] = []
     monkeypatch.setattr(tracked, "get", lambda cc_id: entry() if cc_id == "cc-1" else None)
-    monkeypatch.setattr(tracked, "drop", dropped.append)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(
+        tracked, "drop", lambda cc_id: pytest.fail("dropping the entry loses the conversation name")
+    )
     monkeypatch.setattr(hooks.runtime, "cpctl", lambda *args: runtime.Result(True, stdout="ok\n"))
 
     hooks.on_session_end({"session_id": "cc-1", "reason": "other"})
 
-    assert dropped == ["cc-1"]
+    assert stored and stored[-1].ended_at > 0
+
+
+def test_a_conversation_resumed_after_its_row_closed_keeps_its_name(monkeypatch) -> None:
+    """A closed conversation resumed by the editor keeps the name on its new row.
+
+    The editor ends the Claude process on a window reload and resumes the conversation a minute
+    later. The old row is terminal (§3), so this is a new run — but the same conversation, and
+    it must be recognisable. The name travels in `session start`, not in a later `update`:
+    `tracked.title` is already set, so the first prompt after the reload cannot rename it.
+    """
+    closed = entry()
+    closed.title = "fix the flaky test"
+    closed.turn = 4
+    closed.ended_at = 1234.0
+    stored: list[tracked.Tracked] = []
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: closed if cc_id == "cc-1" else None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(tracked, "for_cwd", lambda _cwd: [])
+    monkeypatch.setattr(tracked, "find_cc_pid", lambda: 4321)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="s_new\n"))[1],
+    )
+
+    hooks.on_session_start({"session_id": "cc-1", "cwd": "/work", "source": "resume"})
+
+    start = calls[0]
+    assert start[start.index("--title") + 1] == "fix the flaky test"
+    resumed = stored[-1]
+    assert resumed.csd_session_id == "s_new"
+    assert resumed.title == "fix the flaky test"
+    assert resumed.ended_at == 0.0
+    assert resumed.turn == 4, "the conversation continues; turn numbering does not restart"
+
+
+def test_a_new_conversation_still_starts_from_the_placeholder(monkeypatch) -> None:
+    stored: list[tracked.Tracked] = []
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(tracked, "for_cwd", lambda _cwd: [])
+    monkeypatch.setattr(tracked, "find_cc_pid", lambda: 4321)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="s_new\n"))[1],
+    )
+
+    hooks.on_session_start({"session_id": "cc-2", "cwd": "/work", "source": "startup"})
+
+    start = calls[0]
+    assert start[start.index("--title") + 1] == "Claude Code · work"
+    assert stored[-1].title == ""
 
 
 def test_stop_reports_a_turn_boundary_and_never_a_status(monkeypatch) -> None:

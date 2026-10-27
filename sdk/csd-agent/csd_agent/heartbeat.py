@@ -74,6 +74,14 @@ def run(verbose: bool = False) -> int:
     closed = 0
 
     for entry in list(entries.values()):
+        # `SessionEnd` already reported this row, and its status is terminal. The entry is
+        # retained only so a conversation the editor resumes inherits its name; probing it
+        # would "close" a closed row and then drop the entry, losing exactly that.
+        if entry.ended_at:
+            if verbose:
+                print(f"ended      {entry.csd_session_id}  (kept for a resume)")
+            continue
+
         # A pid we could not determine is not the same as a process that is gone, and
         # conflating them would be the worst possible bug in this file: the probe would
         # announce that a live session had died, and it would do it within five minutes of

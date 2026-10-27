@@ -36,6 +36,11 @@ from . import config
 #: it. Comfortably longer than the timer interval, so one missed run is not a verdict.
 STALE_TRACKED_SECONDS = 3 * 60 * 60
 
+#: How long a conversation's name is remembered after `SessionEnd` closed its row. Long enough
+#: for "I reopened the editor after lunch", short enough that `tracked.json` stays a handful of
+#: entries. The name is the only thing this retention buys (see `Tracked.ended_at`).
+ENDED_TRACKED_SECONDS = 24 * 60 * 60
+
 
 @dataclass
 class Tracked:
@@ -70,8 +75,16 @@ class Tracked:
     #: first real prompt. It is what makes the name stable: the **first** prompt names the
     #: conversation and later prompts only add `Turn N:` lines, because a session that is
     #: renamed on every prompt is a session you cannot recognise in a list (docs/design.md
-    #: §39). Stored, not re-fetched, so a connector restart does not rename the row.
+    #: §39). Stored, not re-fetched, so a connector restart does not rename the row. It also
+    #: survives `SessionEnd`, which is how a resumed conversation keeps its name (below).
     title: str = ""
+    #: When `SessionEnd` reported this conversation over, or `0.0` while it is live. An ended
+    #: entry is **kept**, not dropped: the editor restarts its Claude process on a window
+    #: reload and resumes the same conversation seconds later, and its next `SessionStart`
+    #: creates a new dashboard row — which must carry the conversation's name, not a prompt
+    #: from after the reload. The heartbeat skips ended entries (`ended_at` already reported a
+    #: close) and `prune()` forgets them after a day.
+    ended_at: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -105,6 +118,7 @@ def load() -> dict[str, Tracked]:
                 pending_message_id=str(raw.get("pending_message_id") or ""),
                 pending_final=bool(raw.get("pending_final")),
                 title=str(raw.get("title") or ""),
+                ended_at=float(raw.get("ended_at") or 0.0),
             )
         except (KeyError, TypeError, ValueError):
             # A malformed row is dropped rather than crashing a hook. Losing one tracked
@@ -157,7 +171,9 @@ def _write_session_map(entries: dict[str, "Tracked"]) -> None:
     """
     by_cwd: dict[str, list[dict]] = {}
     for entry in entries.values():
-        if not entry.cwd or not entry.csd_session_id:
+        # An ended entry names a row the server already closed. Publishing it would point
+        # `cpctl task done|failed` at a finished session.
+        if entry.ended_at or not entry.cwd or not entry.csd_session_id:
             continue
         by_cwd.setdefault(entry.cwd, []).append(
             {
@@ -201,7 +217,13 @@ def get(cc_session_id: str) -> Tracked | None:
 
 
 def for_cwd(cwd: str) -> list[Tracked]:
-    return [e for e in load().values() if e.cwd == cwd]
+    """Live sessions this connector believes ran in a directory.
+
+    Ended ones are excluded: their dashboard rows are already closed, and the sweep that
+    looks for stale processes here would "close" one again and then drop the entry — losing
+    the conversation name a restart is about to reuse.
+    """
+    return [e for e in load().values() if e.cwd == cwd and not e.ended_at]
 
 
 def prune() -> dict[str, Tracked]:
@@ -223,14 +245,22 @@ def prune() -> dict[str, Tracked]:
     """
     entries = load()
     now = time.time()
-    kept = {
-        key: entry
-        for key, entry in entries.items()
-        if (now - max(entry.last_seen_at, entry.started_at)) < STALE_TRACKED_SECONDS
-    }
+    kept = {key: entry for key, entry in entries.items() if _keep(entry, now)}
     if len(kept) != len(entries):
         _save(kept)
     return kept
+
+
+def _keep(entry: Tracked, now: float) -> bool:
+    """Is this entry still worth carrying?
+
+    A live entry is kept while we can still reach the dashboard about it — pruning is on
+    contact, not age, for the reason above. An ended one has nothing left to report, so it
+    ages out on its own clock; it is kept only long enough to name a resumed conversation.
+    """
+    if entry.ended_at:
+        return now - entry.ended_at < ENDED_TRACKED_SECONDS
+    return now - max(entry.last_seen_at, entry.started_at) < STALE_TRACKED_SECONDS
 
 
 # --------------------------------------------------------------------------- #

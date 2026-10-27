@@ -2344,6 +2344,26 @@ that failed must be retried on the next prompt rather than leaving the row on th
 forever. A harness-injected message still names nothing, so the first *real* prompt gets the
 honour even if it arrives second.
 
+### A closed conversation keeps its name
+
+`SessionEnd` used to drop the connector's entry, and the editor makes that a common event: on a
+window reload it ends the Claude process and resumes **the same conversation** seconds later.
+The close is real — the old row is terminal and stays so — but the next `SessionStart` found no
+entry, opened a second row, and named it after the first prompt that arrived *after the reload*.
+From the reader's side the session had been renamed for no reason.
+
+The entry is now kept with `ended_at` set. A later `SessionStart` for that conversation creates
+the new run with the stored name and the stored turn count, so every row the conversation
+produces is named the same thing. Two facts travel with the entry: the heartbeat **skips** ended
+entries (their row is already reported; probing one would close it again and drop the entry), and
+`prune()` ages them out after a day instead of on the contact window.
+
+Rejected: **reopening the old row on resume.** Terminal states are sticky and first-write-wins
+(§3), and a resume is genuinely a new process; a row that says `completed` while events keep
+arriving under it would be the dashboard reporting two contradictory things at once. One
+conversation can therefore produce more than one row, and that is honest — what must not change
+is the name a reader uses to find it.
+
 Rejected: **consuming Claude Code's own session title.** It is the right idea — the schema for
 both `SessionStart` and `UserPromptSubmit` includes `session_title`, and a hook can even return
 one — but 2.1.x omits the field from the payloads we receive (checked against a live

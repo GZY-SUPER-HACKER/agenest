@@ -162,7 +162,7 @@ def on_session_start(payload: dict) -> None:
         return
 
     existing = tracked.get(cc_id)
-    if existing:
+    if existing and not existing.ended_at:
         # `--resume` / `--continue` re-fires SessionStart for a conversation that already
         # has a dashboard session. Creating a second one would split the timeline in two.
         # The pid is refreshed because a resumed session is a new process.
@@ -181,6 +181,13 @@ def on_session_start(payload: dict) -> None:
                       "-m", "session resumed")
         _log(f"SessionStart: reusing {existing.csd_session_id} (resume)")
         return
+
+    # A *closed* entry is a different case, and the one the editor produces constantly: it
+    # ends the Claude process on a window reload and resumes the same conversation seconds
+    # later. The old row is terminal (§3) and cannot be reopened, so this is a new run — but
+    # it is the same conversation, and it must keep the name a reader recognises. Dropping
+    # the entry after `SessionEnd` is how every reload renamed the row after the next prompt.
+    carried = existing
 
     # A previous Claude Code in this same directory that died without SessionEnd is still
     # sitting at `running`. Close it now, before opening a new one, so the dashboard does
@@ -206,7 +213,9 @@ def on_session_start(payload: dict) -> None:
     args = [
         "session", "start",
         "--agent", "claude_code",
-        "--title", f"Claude Code · {project}",
+        # A conversation resumed after its row closed keeps the name it already had; only a
+        # conversation that was never named starts from the placeholder.
+        "--title", carried.title if carried and carried.title else f"Claude Code · {project}",
         "--project", project,
         "--workspace", cwd,
     ]
@@ -231,8 +240,13 @@ def on_session_start(payload: dict) -> None:
         cwd=cwd,
         started_at=now,
         last_seen_at=now,
+        # The conversation continues where the closed run left off: the same name, and the
+        # same turn counter so a resumed `--print` run does not restart at "Turn 1".
+        turn=carried.turn if carried else 0,
+        title=carried.title if carried else "",
     ))
-    _log(f"SessionStart: created {result.value} (pid {pid or 'unknown'})")
+    _log(f"SessionStart: created {result.value} (pid {pid or 'unknown'})"
+         + (f", carrying the name {carried.title!r}" if carried and carried.title else ""))
 
 
 def on_user_prompt(payload: dict) -> None:
@@ -421,7 +435,13 @@ def on_session_end(payload: dict) -> None:
         _log(f"SessionEnd: cpctl failed: {result.detail} "
              f"({entry.csd_session_id} left tracked for the heartbeat)")
         return
-    tracked.drop(cc_id)
+    # **Keep the entry, marked ended** — do not drop it. The editor restarts the Claude
+    # process on a window reload and resumes the same conversation seconds later; the next
+    # `SessionStart` needs the stored name, or the new row is named after whatever prompt
+    # comes first after the reload. The heartbeat skips ended entries and `prune()` forgets
+    # them after a day.
+    entry.ended_at = _now()
+    tracked.put(entry)
     _log(f"SessionEnd: closed {entry.csd_session_id} (reason={reason})")
 
 
