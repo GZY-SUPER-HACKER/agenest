@@ -175,6 +175,7 @@ def on_session_start(payload: dict) -> None:
             started_at=existing.started_at,
             last_seen_at=existing.last_seen_at,
             turn=existing.turn,
+            title=existing.title,
         ))
         runtime.cpctl("event", "--session", existing.csd_session_id, "--type", "heartbeat",
                       "-m", "session resumed")
@@ -246,11 +247,22 @@ def on_user_prompt(payload: dict) -> None:
     # on the turn number, so reusing the previous one would deduplicate the boundary away and
     # leave the page showing the state of a turn that has already ended.
     title = "" if _is_system_message(prompt) else _first_line(prompt)
-    if title:
+
+    # **The first real prompt names the conversation; later prompts do not rename it.** A row
+    # whose name changes every time you say something is a row you cannot recognise, and the
+    # latest prompt is already the `Turn N:` line below — the card has both facts without the
+    # title being one of them (docs/design.md §39). The stored `title` is also what keeps a
+    # connector restart or a `--resume` from renaming a session that was already named.
+    if title and not entry.title:
         result = runtime.cpctl("session", "update", "--session", entry.csd_session_id,
                                "--title", title)
-        _log(f"UserPromptSubmit: title -> {title!r}" if result.ok
-             else f"UserPromptSubmit: cpctl failed: {result.detail}")
+        if result.ok:
+            entry.title = title
+            _log(f"UserPromptSubmit: title -> {title!r}")
+        else:
+            # Keep `title` empty so the next prompt tries again rather than leaving the row
+            # on the server's placeholder forever.
+            _log(f"UserPromptSubmit: cpctl failed: {result.detail}")
 
     # The prompt is the only thing that says "the agent is now working on X": `SessionStart`
     # fired hours ago, and `Stop` only says the turn is over. Without this the timeline of a

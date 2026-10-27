@@ -2309,6 +2309,34 @@ prompt, so the tag — not a guess from the words — decides. Rejected: **repor
 `Turn N: system message` line instead.** That is the same noise in a second place, and the
 status already says the session is open; the next real prompt names the work.
 
+### The first real prompt names the session, and only that one
+
+The title was originally rewritten on every `UserPromptSubmit`, so the card showed whatever was
+said most recently. That makes the name a status: the same row appears under a different name
+each time the user speaks, which is exactly what a name is not for — and the timeline already
+carries the latest prompt as the `Turn N:` line, so the title was the second place to read it.
+
+Now the **first** real prompt names the conversation and later prompts only add progress lines.
+`tracked.title` records the name once the report lands, which is what keeps two cases from
+re-deriving it: a `--resume` re-fires `SessionStart` for the same conversation, and a report
+that failed must be retried on the next prompt rather than leaving the row on the placeholder
+forever. A harness-injected message still names nothing, so the first *real* prompt gets the
+honour even if it arrives second.
+
+Rejected: **consuming Claude Code's own session title.** It is the right idea — the schema for
+both `SessionStart` and `UserPromptSubmit` includes `session_title`, and a hook can even return
+one — but 2.1.x omits the field from the payloads we receive (checked against a live
+`claude -p`), and what the local session registry holds is the cwd-derived name
+(`coding-session-dashboard-b8`), not a summary of the work. A derived directory name must not
+outrank the prompt that describes the task. If a future version starts sending a title the user
+would recognise, this is the field to consume, and `tracked.title` is already the place to
+compare it against.
+
+Rejected: **an LLM-generated summary of the first prompt.** It would be a second model call
+from inside someone's agent, on their credential, on the critical path of a hook — and the
+connector has no credential of its own by design (§22). The prompt's first line is the summary
+the user already wrote.
+
 ---
 
 ## 40. A task verdict is an event, and the harness cannot supply it

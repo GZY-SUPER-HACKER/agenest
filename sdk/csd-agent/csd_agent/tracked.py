@@ -66,6 +66,12 @@ class Tracked:
     #: True once `MessageDisplay` reported the message's final batch. A partial message is not
     #: a checkpoint: the model may still be mid-sentence when a tool batch starts.
     pending_final: bool = False
+    #: The dashboard title this connector has reported for the session, or `""` before the
+    #: first real prompt. It is what makes the name stable: the **first** prompt names the
+    #: conversation and later prompts only add `Turn N:` lines, because a session that is
+    #: renamed on every prompt is a session you cannot recognise in a list (docs/design.md
+    #: §39). Stored, not re-fetched, so a connector restart does not rename the row.
+    title: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -98,6 +104,7 @@ def load() -> dict[str, Tracked]:
                 pending_text=str(raw.get("pending_text") or ""),
                 pending_message_id=str(raw.get("pending_message_id") or ""),
                 pending_final=bool(raw.get("pending_final")),
+                title=str(raw.get("title") or ""),
             )
         except (KeyError, TypeError, ValueError):
             # A malformed row is dropped rather than crashing a hook. Losing one tracked

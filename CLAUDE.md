@@ -310,6 +310,11 @@ of your problems.
   encoding failed, so the client saw a 500 — and `tracked.json` could not be written. Titles
   never updated while session start/end kept working, because those payloads carry no prose
   (§43).
+- **A session's name comes from its first real prompt, and only that one.** Every later prompt
+  is a `Turn N:` line, not a rename: a row that changes name each time you speak cannot be
+  recognised. `tracked.title` carries the name across a `--resume` and retries it after a
+  failed report. Claude Code 2.1.x omits `session_title` from its payloads, and its local
+  registry name is cwd-derived, so neither is consumed (§39).
 
 ### The credentials, and why their defaults differ
 
