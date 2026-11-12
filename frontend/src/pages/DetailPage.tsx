@@ -221,11 +221,12 @@ export function DetailPage({
       )}
 
       {/*
-        Needs attention had no exit: `failed` and `interrupted` rows offer nothing to act on,
-        and the connector writes `interrupted` itself when a process vanishes, so the row could
-        ask forever. This is the reader's answer — and it is offered for anything that is
-        currently asking, including a running session that is blocked on you (docs/design.md
-        §42).
+        Needs attention had no exit: a `failed` row, or a `task_failed` verdict that landed
+        after the run closed, offers nothing to act on, so it could ask forever. This is the
+        reader's answer — and it is offered for anything that is currently asking, including a
+        running session that is blocked on you (docs/design.md §42). An `interrupted` session
+        has nothing to dismiss, because it never enters the list: the status says how the run
+        stopped, and no action was ever owed for it (§42).
       */}
       {needsAttention(detail) && (
         <DismissAction
@@ -329,10 +330,12 @@ function CloseAction({
 /**
  * Dismiss a session from needs-attention (docs/design.md §42).
  *
- * Needs attention is a list of decisions, and for `failed` / `interrupted` there was nothing
- * to act on: an ended session never reports anything new, so the row could only accumulate.
- * Closing records *how the run ended*; this records that a person has *read* it. Different
- * facts, and the second one must not be written into the status.
+ * Needs attention is a list of decisions, and for `failed` — and for a `task_failed` verdict
+ * that arrived after the run closed — there is nothing to act on: an ended session never
+ * reports anything new, so the row could only accumulate. Closing records *how the run ended*;
+ * this records that a person has *read* it. Different facts, and the second one must not be
+ * written into the status. An `interrupted` row is not offered this, because it never enters
+ * the list at all (§42).
  *
  * **One-way on purpose.** There is no "put it back" button: the row never leaves the board (it
  * joins Finished, or Running while it is still open), and any report newer than the

@@ -120,13 +120,20 @@ Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍�
 写着进程是怎么结束的。为了让 agent 报完 verdict 之后紧跟的 `turn_completed` 不把它盖掉，服务端
 单独投影了 `last_verdict`。见 [docs/design.md](docs/design.md) §40。
 
-needs attention 以前只能进不能出：`failed` / `interrupted` 的行没有任何可点的动作，而
-`interrupted` 最常见的来源恰恰是 connector 发现进程消失后自己写的。现在详情页可以 **Dismiss**——
-它表示"我看到了，这里没有我的事了"，记录的是人读过了，而不是任务结果，所以不改变 status、不写
-事件、也不动 `updated_at`。行会落到 Finished（仍在跑的回到 Running），并没有消失；而且服务端记的是
-"dismiss 时最新的事件 id"这种水印：之后任何更新的报告（比如关闭后才到的 `task_failed`）都会让它
-重新回到 needs attention，heartbeat 不会。Dismiss 是单向的——没有单独的撤回接口，因为更新的报告
-就是回来的路。见 [docs/design.md](docs/design.md) §42。
+needs attention 现在是三份报告：`awaiting_user`、`task_failed`、`failed`——每一份都留下一个要人做
+的决定。`interrupted` 不在其中：它只说"进程停了、没有结果"，来源是窗口重载、connector 的存活探针、
+`--print` 探测、或者你自己按下的 Close，没有一个是请求。这类会话直接落到 **Finished**，状态胶囊照旧
+写 `interrupted`；rail 的 **Failed** 过滤器仍然包含它（那回答的是"哪里出了问题"，不是"现在要我
+做什么"）。真正"活没干完"的情况由关闭后才到的 `task_failed` 承担。在云端 5880 上，这条规则之前的
+数字是 205 行里 101 行在 Needs attention，几乎全是 `interrupted`，只能一行行 Dismiss。见
+[docs/design.md](docs/design.md) §42。
+
+needs attention 以前只能进不能出：`failed` 的行、以及关闭后才到的 `task_failed`，都没有任何可点的
+动作。现在详情页可以 **Dismiss**——它表示"我看到了，这里没有我的事了"，记录的是人读过了，而不是任务
+结果，所以不改变 status、不写事件、也不动 `updated_at`。行会落到 Finished（仍在跑的回到 Running），
+并没有消失；而且服务端记的是"dismiss 时最新的事件 id"这种水印：之后任何更新的报告（比如关闭后才到
+的 `task_failed`）都会让它重新回到 needs attention，heartbeat 不会。Dismiss 是单向的——没有单独的
+撤回接口，因为更新的报告就是回来的路。见 [docs/design.md](docs/design.md) §42。
 
 要接入一个真实在跑的 agent，而不是手写上报：
 

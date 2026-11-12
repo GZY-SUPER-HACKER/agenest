@@ -821,14 +821,23 @@ projected onto the session as `last_verdict`, separately from `last_event`, beca
 with a `task_failed` verdict sits under needs-attention, not finished; `task_completed` is the
 positive half and stays where it was. See design.md §40.
 
-**Needs-attention has an exit.** `failed` and `interrupted` rows used to offer nothing to click,
-and the ordinary source of `interrupted` is the connector closing a process that vanished — so
-the row asked for attention forever. `POST /api/sessions/{id}/dismiss` records that a person has
-read it. The row stores the newest event id at dismissal, so a report newer than the
-acknowledgement — typically a `task_failed` verdict that arrived after the run closed — asks
-again; a heartbeat does not, and there is no un-dismiss route because that is the way back. It
-moves no status, writes no event, and leaves `updated_at` alone; the session lands in *Finished*
-(or *Running*, if it is still open) rather than disappearing. See design.md §42.
+**`interrupted` does not put a session under needs-attention.** Needs attention is built from
+three reports, each leaving you something to decide: `awaiting_user`, a `task_failed` verdict,
+and `failed`. `interrupted` only says the run stopped without an outcome — what a window
+reload, the connector's liveness check, a `--print` probe, or your own Close leaves behind — so
+those rows land in *Finished* with the pill still saying `interrupted`. The rail's *Failed*
+filter still lists them, because that answers "what went wrong", not "what needs me now"; a
+killed run whose work really is unfinished asks through a `task_failed` verdict instead. See
+design.md §42.
+
+**Needs-attention has an exit.** A `failed` row — and a `task_failed` verdict that landed after
+the run closed — used to offer nothing to click, so it asked for attention forever.
+`POST /api/sessions/{id}/dismiss` records that a person has read it. The row stores the newest
+event id at dismissal, so a report newer than the acknowledgement — typically a `task_failed`
+verdict that arrived after the run closed — asks again; a heartbeat does not, and there is no
+un-dismiss route because that is the way back. It moves no status, writes no event, and leaves
+`updated_at` alone; the session lands in *Finished* (or *Running*, if it is still open) rather
+than disappearing. See design.md §42.
 
 **SSE is a notification, not a record.** The stream carries `id:` (a database event id) so a
 reconnecting client resumes with `?cursor=<id>`. A client that was away longer than the

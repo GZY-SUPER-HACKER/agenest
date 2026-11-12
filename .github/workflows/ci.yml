@@ -52,6 +52,8 @@ jobs:
         run: npm run build
       - name: Rail grouping check
         run: npm run check:rail
+      - name: Needs-attention and bucket partition check
+        run: npm run check:board
 
   dsh-reporter:
     name: dsh reporter

@@ -192,9 +192,11 @@ def close_session(
     Idempotent and safe to repeat: terminal states are sticky and first-write-wins (§3), so
     closing an already-closed session applies nothing and returns the session unchanged.
 
-    Closing does **not** dismiss the row (§42). The two say different things — how it ended,
-    and whether a person has read it — and the row is often closed by the connector's liveness
-    check with nobody looking.
+    Closing does **not** dismiss the row (§42). The two answer different questions — how it
+    ended, and whether a person has read it — and a row can be asking for attention for a
+    reason closing does not touch (a `task_failed` verdict survives the patch). A row whose
+    only fact was `running` simply leaves the live board; `interrupted` is not itself a
+    needs-attention report.
     """
     data = SessionPatch(
         status=SessionStatus.interrupted,
@@ -225,9 +227,10 @@ def dismiss_session(
 ) -> SessionOut:
     """Record that a person has read this session and needs nothing further from it.
 
-    Needs-attention had no exit: `failed` and `interrupted` rows offer nothing to click, and
-    the ordinary way to get one is a connector closing a process that vanished, so the list
-    could only grow. This is that exit (docs/design.md §42).
+    Needs-attention had no exit: a `failed` row, or a `task_failed` verdict that arrives after
+    the run closed, offers nothing to click, so the list could only grow. This is that exit
+    (docs/design.md §42). `interrupted` rows are not in the list at all — the status says how
+    the run stopped, not that anything is owed to the reader.
 
     It moves no status and executes nothing — the row still says how the run ended — and it
     is **self-clearing**: the stored watermark is compared with the newest display event, so

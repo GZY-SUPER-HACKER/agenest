@@ -83,6 +83,7 @@ cd backend && .venv/Scripts/python -m pytest
 # Frontend (from frontend/)
 npm run build       # tsc -b && vite build → dist/, which the backend serves via CSD_STATIC_DIR
 npm run check:rail  # the rail's host→harness→project→session grouping; esbuild + node, no framework
+npm run check:board # needs-attention + the overview's four-bucket partition; esbuild + node
 npm run dev
 
 # Seed realistic multi-harness data (needs ./dev.sh start first; reads backend/data/dev-token)
@@ -209,6 +210,9 @@ of your problems.
   the task still belongs under needs-attention. Never infer it from an exit code or the final
   prose (§40).
 - **A session leaves needs-attention when a person dismisses it, and a dismissal is a watermark.**
+  The list is three reports — `awaiting_user`, a `task_failed` verdict, `failed`; **`interrupted`
+  is not one of them**, because it says how the run stopped, not that anything is owed to the
+  reader (§42).
   `dismissed_event_id` is compared with the newest *display* event on every response, so a verdict
   that lands after the acknowledgement asks again — and a heartbeat does not. It changes no
   status, writes no event, and moves neither `updated_at` nor `last_activity_at` (acknowledging

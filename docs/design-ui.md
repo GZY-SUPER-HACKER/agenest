@@ -240,13 +240,25 @@ agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 - 分区时 task-failed 从 running / idle / finished 里扣掉，保证 tile 仍然精确相加；
 - 状态胶囊不变：它说的是**进程怎么结束的**，verdict 说的是**活成没成**，两个事实都保留。
 
+### `interrupted` 不进入 needs-attention
+
+needs-attention 是三份报告：`awaiting_user`、`task_failed`、`failed`，每一份都留下一个要人做的决定。
+`interrupted` 不在其中（docs/design.md §42）：它说的是"进程停了、没有结果"，来源是窗口重载、
+connector 的存活探针、`--print` 探测、或者用户自己按下的 Close——没有一个是请求，最后一个是
+"我没有别的事了"的反面。这类会话直接落到 **Finished**，状态胶囊照旧写 `interrupted`；rail 的
+**Failed** 过滤器仍然包含它，因为那回答的是"哪里出了问题"，不是"现在要我做什么"。真正"活没干完"
+的情况由 `task_failed` 承担，它可以在 session 关闭之后才到（docs/design.md §40）。
+
+在云端 5880 上这条规则之前的数字：205 行里 101 行在 Needs attention，几乎全是 `interrupted`，
+只能一行一行 Dismiss。一屏红点不会被读——包括其中真正需要人看的那几行。
+
 ### 退出 needs-attention 是一次人的动作
 
-needs-attention 原来是只进不出的：`failed` / `interrupted` 的行没有任何可点的动作，而 connector
-在进程消失时自己写下的 `interrupted` 会一直挂在最上面。详情页现在在时间线上方多一个安静的动作盒：
+needs-attention 以前只能进不能出：`failed` 的行没有任何可点的动作，关闭后才到的 `task_failed`
+也一样，所以详情页现在在时间线上方多一个安静的动作盒：
 
 - **Dismiss = "我看到了，这里没有我的事了"。** 它不改变 status，也不写事件；行本身还留在板上
-  （已结束的落进 Finished，仍在跑的回到 Running），状态胶囊照旧说 `interrupted`。
+  （已结束的落进 Finished，仍在跑的回到 Running），状态胶囊照旧说它是怎么结束的。
 - **单向，没有 undo，也没有确认框。** dismiss 过的会话不会再多一个 "Put back" 按钮：行还留在板上
   （已结束的落进 Finished），而且任何比 dismiss 更新的报告都会自己把它放回 needs-attention——那个
   自清除就是 undo，而且只在真正有意义的报告上触发。既然什么都没删、状态照旧可见，就不需要再弹一个
@@ -255,6 +267,8 @@ needs-attention 原来是只进不出的：`failed` / `interrupted` 的行没有
   verdict 在 session 关闭之后才到达的那种顺序（docs/design.md §40）。所以一个被 dismiss 的仍在
   运行的会话，下一条 `progress` 就会重新提出请求；而 heartbeat 不会——心跳是活着，不是干活。
 - **安静，不是警报。** 和 close box 同一种卡片形状、同一套 token：dismiss 是整理，不是一个红点。
+
+`interrupted` 行不显示这个动作盒——它从来没有提出请求，也就没有什么要 dismiss。
 
 ## 附件：卡片，不是链接
 
