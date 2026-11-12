@@ -321,6 +321,11 @@ of your problems.
   reload that resumes it opens a new row with the same name; the heartbeat skips ended entries
   and `prune()` ages them out after a day. Claude Code 2.1.x omits `session_title` from its
   payloads, and its local registry name is cwd-derived, so neither is consumed (§39).
+- **A placeholder title is not a name, and a filesystem root is not a project.** When
+  `SessionStart` cannot derive a project (`/`, `D:\`), the connector writes `New session` and
+  omits `--project` instead of putting the root on the card as `Claude Code · /`. The startup
+  migration renames only rows whose title is the old placeholder built verbatim from a root
+  workspace, leaves timestamps alone, and is idempotent by shape (§39).
 
 ### The credentials, and why their defaults differ
 

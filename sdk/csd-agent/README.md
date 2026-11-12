@@ -411,6 +411,13 @@ is written for them. The turn counter still advances, because `Stop` keys its bo
 number and reusing the previous one would deduplicate that boundary away. Full argument in
 `docs/design.md` §39.
 
+The title `SessionStart` writes is a placeholder until the first real prompt names the row.
+When the working directory has a name, it is worth having (`Claude Code · conference`); when
+the cwd is a filesystem root — `/` in a VS Code remote window, `D:\` at a drive root — there
+is no project name to add, so the connector writes `New session` and reports no project at
+all rather than `Claude Code · /`. The server's startup migration renames rows an older
+connector already wrote in that shape (§39).
+
 ## Requirements
 
 - Linux with systemd user units, and **lingering enabled** (`loginctl enable-linger $USER`)

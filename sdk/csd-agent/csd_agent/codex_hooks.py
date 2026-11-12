@@ -25,12 +25,19 @@ from `codex-rs/hooks/schema/generated/*.command.input.schema.json`.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from . import runtime, tracked
 from .payload import read_stdin
 from . import host as host_report
-from .hooks import _first_line, _host_label, _is_system_message, _log, _now
+from .hooks import (
+    NEW_SESSION_TITLE,
+    _first_line,
+    _host_label,
+    _is_system_message,
+    _log,
+    _now,
+    project_of,
+)
 
 #: The dashboard's `MAX_MESSAGE`. A summary line is capped here so a long prompt cannot make
 #: the event a 422.
@@ -46,10 +53,6 @@ def _entry_for(payload: dict) -> tracked.Tracked | None:
 
 def _key(*parts: object) -> str:
     return ":".join(str(part) for part in parts if part not in (None, ""))[:MAX_KEY]
-
-
-def _project_of(cwd: str) -> str:
-    return Path(cwd).name if cwd else "codex"
 
 
 def on_session_start(payload: dict) -> None:
@@ -73,13 +76,17 @@ def on_session_start(payload: dict) -> None:
         return
 
     cwd = payload.get("cwd") or ""
-    project = _project_of(cwd)
+    # An absent cwd keeps the explicit `codex` label it always had; a *present* cwd that is a
+    # filesystem root is the other case — there is a directory, it just has no name to put on
+    # the card, so the title says `New session` instead of `Codex · /` (§39).
+    project = project_of(cwd) if cwd else "codex"
     args = [
         "session", "start",
         "--agent", "codex",
-        "--title", f"Codex · {project}",
-        "--project", project,
+        "--title", f"Codex · {project}" if project else NEW_SESSION_TITLE,
     ]
+    if project:
+        args += ["--project", project]
     if cwd:
         args += ["--workspace", cwd]
     if label := _host_label():

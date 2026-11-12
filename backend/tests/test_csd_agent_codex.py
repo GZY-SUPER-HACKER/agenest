@@ -161,6 +161,24 @@ def test_session_start_creates_a_codex_session(monkeypatch, calls: FakeCalls) ->
     assert calls.stored[-1].csd_session_id == "s_codex"
 
 
+def test_a_root_cwd_starts_as_new_session(monkeypatch, calls: FakeCalls) -> None:
+    """The same rule as the Claude Code reporter: a root is not a project (§39)."""
+    monkeypatch.setattr(codex_hooks.tracked, "get", lambda _sid: None)
+    monkeypatch.setattr(codex_hooks.tracked, "put", calls.stored.append)
+
+    codex_hooks.run(raw=json.dumps({
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-root",
+        "cwd": "/",
+        "source": "startup",
+    }))
+
+    start = calls.of("session")[0]
+    assert start[start.index("--title") + 1] == "New session"
+    assert "--project" not in start
+    assert start[start.index("--workspace") + 1] == "/"
+
+
 def test_prompt_and_stop_are_the_turn_vocabulary(monkeypatch, calls: FakeCalls) -> None:
     current = entry()
     monkeypatch.setattr(codex_hooks.tracked, "get", lambda _sid: current)

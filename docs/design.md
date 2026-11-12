@@ -2378,6 +2378,42 @@ from inside someone's agent, on their credential, on the critical path of a hook
 connector has no credential of its own by design (§22). The prompt's first line is the summary
 the user already wrote.
 
+### A placeholder title is not a name, and a root is not a project
+
+`SessionStart` fires before the user has typed anything, so the connector writes a placeholder
+built from the working directory: `Claude Code · <project>`. That is a placeholder, not a name
+— the first real prompt replaces it — but it is worth keeping while the directory has a name,
+because `Claude Code · conference` still says where the row came from.
+
+It is not worth keeping when the directory has no name. `Path(cwd).name` is `""` at a
+filesystem root, and the old fallback (`or cwd`) made the root its own project: a VS Code
+remote window starts `claude` with cwd `/`, so the card read `Claude Code · /`, `--project`
+was `/`, and the project filter carried an entry that was not a project. A drive root produced
+`Claude Code · D:\`. Those rows say exactly one thing — *opened, nobody has spoken* — and 101
+of the 205 rows on the hosted dashboard were that shape: empty windows, window reloads,
+`--print` probes, and ghosts that ended seconds later.
+
+When no project can be derived, the connector now writes `New session` and omits `--project`
+entirely, so the page shows its existing empty-project rendering (`—`) instead of a slash
+pretending to be a name. The check is spelled across both path flavours (`/` and `D:\` are
+asked as POSIX and Windows paths) rather than the runner's own `Path`, because a Windows
+connector and a Linux CI runner must give the same answer; a POSIX directory that merely
+contains a backslash is still read as POSIX.
+
+The rows already written are renamed by the startup migration, which matches only the exact
+old placeholder (`'<agent> · ' || workspace`, the string the old fallback wrote verbatim)
+whose workspace is a root. `Claude Code · conference` cannot match (its workspace has a
+name), and a prompt-derived title opened from `/` cannot match either (its title is the
+prompt). The migration is display-only and idempotent by shape: no status, no event, and no
+`updated_at` — renaming a placeholder is not activity, and reordering the board for a
+cosmetic change would be a second lie. A second boot matches nothing, and a database with no
+such row is a no-op.
+
+Rejected: **keeping the root as the project, since that is where the work happened.** A root
+is where *nothing* in particular happened; a list of `/` and `D:\` rows is a list of rows the
+reader cannot tell apart, and the answer to "which work is this?" became a directory that
+contains every project on the machine.
+
 ---
 
 ## 40. A task verdict is an event, and the harness cannot supply it

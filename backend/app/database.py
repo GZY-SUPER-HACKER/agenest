@@ -22,7 +22,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import Settings
 
@@ -257,6 +257,22 @@ CREATE INDEX IF NOT EXISTS idx_agent_attachments_thread
 """
 
 
+def _is_root_workspace(path: str) -> bool:
+    """Is this working directory a filesystem root, on either platform?
+
+    A connector reports the cwd of *its own* machine, and this service may run on the other
+    OS, so the platform's `Path` cannot decide: on POSIX `Path("D:\\\\").name` is the whole
+    string rather than "". The connector's `project_of` asks the same question the same way
+    (sdk/csd-agent `hooks.py`), which is what keeps this migration and new reports agreeing.
+    """
+    if not path:
+        return False
+    windows = PureWindowsPath(path)
+    if windows.drive or path.startswith("\\"):
+        return not windows.name
+    return not PurePosixPath(path).name
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -330,6 +346,42 @@ class Database:
                 "ssh_port": "INTEGER NOT NULL DEFAULT 22",
             },
         )
+
+        # A placeholder title is not a name (§39). Display-only, shape-based, idempotent.
+        self._retitle_root_sessions()
+
+    def _retitle_root_sessions(self) -> None:
+        """Rewrite the root-directory placeholders older connectors wrote.
+
+        `SessionStart` precedes the user's first prompt, so it writes a placeholder title. When
+        the cwd had a name that was useful (`Claude Code · conference`); when it was a
+        filesystem root the old connector used the root itself as the project, so the card read
+        `Claude Code · /` or `Claude Code · D:\\` — a title made of punctuation. Those rows are
+        exactly "opened, nobody has spoken", so they are renamed to `New session` and lose the
+        root that was masquerading as a project name (§39).
+
+        Conservative by construction: a row matches only when its title is precisely the old
+        placeholder (`'<agent> · ' || workspace`, the old fallback wrote the cwd verbatim) *and*
+        that workspace is a root. A named session opened from `/` keeps its prompt-derived
+        title, and `Claude Code · conference` is untouched because its workspace has a name.
+
+        Idempotent by shape rather than by a marker: the rewritten title no longer equals the
+        old placeholder, so a second boot matches nothing, and a database with no such rows is
+        a no-op. Timestamps are deliberately not touched — renaming a placeholder is not
+        activity, and `updated_at` is what orders the board.
+        """
+        rows = self.query(
+            "SELECT id, workspace FROM sessions WHERE workspace IS NOT NULL AND ("
+            "title = 'Claude Code · ' || workspace OR title = 'Codex · ' || workspace)"
+        )
+        ids = [row["id"] for row in rows if _is_root_workspace(row["workspace"])]
+        if not ids:
+            return
+        with self.write() as conn:
+            conn.executemany(
+                "UPDATE sessions SET title = 'New session', project_name = NULL WHERE id = ?",
+                [(session_id,) for session_id in ids],
+            )
 
     def _add_missing(self, table: str, columns: dict[str, str]) -> None:
         """`ALTER TABLE ... ADD COLUMN` for whichever of `columns` the table lacks.

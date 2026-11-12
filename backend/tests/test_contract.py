@@ -6,8 +6,12 @@ plausible-looking refactor quietly breaks the contract.
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from app.database import Database
 from helpers import DASH_TOKEN, INGEST, READ, TOKEN, report
 
 
@@ -942,3 +946,77 @@ def test_list_carries_last_event_for_every_session(client: TestClient) -> None:
     # Sessions with only their opening event still carry one.
     for sid in ids[1:]:
         assert by_id[sid]["last_event"]["event_type"] == "session_started"
+
+
+# --------------------------------------------------------------------------- #
+# placeholder titles (§39)
+# --------------------------------------------------------------------------- #
+def _seed_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    agent_type: str,
+    title: str,
+    project_name: str | None,
+    workspace: str | None,
+    updated_at: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO sessions (id, agent_type, title, project_name, workspace, status,"
+        " started_at, last_activity_at, finished_at, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, 'completed', 't0', 't0', 't0', 't0', ?)",
+        (session_id, agent_type, title, project_name, workspace, updated_at),
+    )
+
+
+def test_the_migration_renames_root_directory_placeholders(tmp_path: Path) -> None:
+    """A root is not a project, so `Claude Code · /` becomes `New session` (§39).
+
+    This is the deployed-box half of the rule: the connector stops writing the root as a
+    project, but the rows it already wrote stay in the database. The match is deliberately
+    narrow — the exact old placeholder *and* a root workspace — so `Claude Code · conference`
+    and a prompt-derived name opened from `/` both survive. Renaming a placeholder is not
+    activity, so the timestamps are untouched and the board keeps its order.
+    """
+    path = tmp_path / "old.sqlite3"
+    Database(path).close()  # create the current schema
+
+    conn = sqlite3.connect(path)
+    _seed_session(conn, "s_posix", "claude_code", "Claude Code · /", "/", "/", "2026-01-01")
+    _seed_session(conn, "s_windows", "claude_code", "Claude Code · D:\\", "D:\\", "D:\\",
+                  "2026-01-02")
+    _seed_session(conn, "s_codex", "codex", "Codex · /", "/", "/", "2026-01-03")
+    _seed_session(conn, "s_named", "claude_code", "fix the flaky test", None, "/", "2026-01-04")
+    _seed_session(conn, "s_project", "claude_code", "Claude Code · conference", "conference",
+                  "/home/me/conference", "2026-01-05")
+    _seed_session(conn, "s_already", "claude_code", "New session", None, "/", "2026-01-06")
+    _seed_session(conn, "s_null", "claude_code", "Claude Code · /", "/", None, "2026-01-07")
+    conn.commit()
+    conn.close()
+
+    migrated = Database(path)
+    try:
+        rows = {row["id"]: row for row in migrated.query("SELECT * FROM sessions")}
+    finally:
+        migrated.close()
+
+    for session_id in ("s_posix", "s_windows", "s_codex"):
+        assert rows[session_id]["title"] == "New session"
+        assert rows[session_id]["project_name"] is None
+    assert rows["s_posix"]["updated_at"] == "2026-01-01", "renaming is not activity"
+    # The name the reader recognises is not a placeholder, and a real placeholder still says
+    # which project the row belongs to.
+    assert rows["s_named"]["title"] == "fix the flaky test"
+    assert rows["s_project"]["title"] == "Claude Code · conference"
+    assert rows["s_project"]["project_name"] == "conference"
+    # Without a workspace there is nothing to prove the root, so the row is left alone.
+    assert rows["s_null"]["title"] == "Claude Code · /"
+
+    # Idempotent by shape: a second boot matches nothing, and already-renamed rows stay put.
+    again = Database(path)
+    try:
+        count = again.query_one(
+            "SELECT COUNT(*) AS n FROM sessions WHERE title = 'New session'"
+        )["n"]
+        assert count == 4
+    finally:
+        again.close()
