@@ -87,13 +87,18 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 
 from . import config, runtime, tracked
 from .payload import read_stdin
 
 #: Long enough for a real task description, short enough not to wrap on a phone.
 MAX_TITLE = 68
+
+#: What a row is called while nobody has spoken and its working directory cannot name it.
+#: A filesystem root is not a project: `Claude Code · /` was a title that told the reader
+#: nothing except punctuation, and on a hosted box it was 101 of 205 rows (§39).
+NEW_SESSION_TITLE = "New session"
 
 #: Matches the backend's `MAX_MESSAGE`. The sentence is capped here as well so a runaway
 #: message does not grow `tracked.json` between hook processes.
@@ -148,6 +153,28 @@ def _is_system_message(text: str) -> bool:
     content would silently drop a prompt that merely mentions a notification.
     """
     return text.lstrip().startswith(SYSTEM_MESSAGE_TAGS)
+
+
+def project_of(cwd: str) -> str:
+    """The working directory's own name, or "" when it is a filesystem root.
+
+    The old fallback was `Path(cwd).name or cwd`, which made a root its own project: a VS Code
+    remote window starts `claude` with cwd `/`, so the placeholder became `Claude Code · /`
+    and a drive root became `Claude Code · D:\\`. Both mean only "opened, nobody has spoken",
+    which is what `NEW_SESSION_TITLE` says instead (§39).
+
+    Both path flavours are consulted rather than the platform's own `Path`, because the answer
+    must not depend on which OS the connector happens to run on: `/` and `D:\\` are roots
+    either way, while an ordinary path has a name under both. A Windows path is recognised by
+    its drive or its leading separator, so a POSIX directory that merely contains a backslash
+    is still read as POSIX.
+    """
+    if not cwd:
+        return ""
+    windows = PureWindowsPath(cwd)
+    if windows.drive or cwd.startswith("\\"):
+        return windows.name
+    return PurePosixPath(cwd).name
 
 
 # --------------------------------------------------------------------------- #
@@ -209,16 +236,25 @@ def on_session_start(payload: dict) -> None:
             tracked.drop(stale.cc_session_id)
             _log(f"SessionStart: closed dead {stale.csd_session_id} (pid {stale.pid} gone)")
 
-    project = Path(cwd).name or cwd
+    project = project_of(cwd)
+    # A conversation resumed after its row closed keeps the name it already had; only a
+    # conversation that was never named starts from the placeholder — and the placeholder is
+    # the project only when the directory has a name to give. A root gets `New session` and
+    # no project at all, rather than `/` wearing a project's clothes (§39).
+    if carried and carried.title:
+        title = carried.title
+    elif project:
+        title = f"Claude Code · {project}"
+    else:
+        title = NEW_SESSION_TITLE
     args = [
         "session", "start",
         "--agent", "claude_code",
-        # A conversation resumed after its row closed keeps the name it already had; only a
-        # conversation that was never named starts from the placeholder.
-        "--title", carried.title if carried and carried.title else f"Claude Code · {project}",
-        "--project", project,
+        "--title", title,
         "--workspace", cwd,
     ]
+    if project:
+        args += ["--project", project]
     # Attribute the session to this machine, so the rail can nest it under the host it ran on.
     # Omitted rather than sent empty when the config is missing: the API treats a blank host
     # as "no host recorded", and a session reported with no host is grouped apart instead of
@@ -425,7 +461,8 @@ def on_session_end(payload: dict) -> None:
     tracked.put(entry)
     result = runtime.cpctl("session", "finish", "--session", entry.csd_session_id,
                            "--status", "completed",
-                           "--summary", f"Claude Code session ended ({reason}) in {Path(cwd).name}")
+                           "--summary",
+                           f"Claude Code session ended ({reason}) in {project_of(cwd) or cwd}")
     if not result.ok:
         # **Do not drop the entry.** Dropping it is how a failed report becomes permanent:
         # the dashboard keeps the session at `running` and the heartbeat, which is the only

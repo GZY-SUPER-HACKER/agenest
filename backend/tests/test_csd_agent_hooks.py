@@ -157,6 +157,55 @@ def test_a_new_conversation_still_starts_from_the_placeholder(monkeypatch) -> No
     assert stored[-1].title == ""
 
 
+@pytest.mark.parametrize("cwd", ["/", "D:\\", "D:/", "\\\\server\\share"])
+def test_a_root_directory_never_becomes_the_project_name(cwd, monkeypatch) -> None:
+    """A filesystem root is not a project, so the row says `New session` (§39).
+
+    A VS Code remote window starts `claude` with cwd `/`, and the old fallback
+    (`Path(cwd).name or cwd`) put the root where a project name belongs: the card read
+    `Claude Code · /` and nothing on it said what the row was. The same fallback is what made
+    `--project /`, which then showed up in the project filter as if it were a name.
+
+    The parametrisation runs on every machine: a Windows cwd is judged the same on Linux CI,
+    because the connector must not answer differently from the platform it happens to run on.
+    """
+    stored: list[tracked.Tracked] = []
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tracked, "get", lambda cc_id: None)
+    monkeypatch.setattr(tracked, "put", stored.append)
+    monkeypatch.setattr(tracked, "for_cwd", lambda _cwd: [])
+    monkeypatch.setattr(tracked, "find_cc_pid", lambda: 4321)
+    monkeypatch.setattr(
+        hooks.runtime,
+        "cpctl",
+        lambda *args: (calls.append(args), runtime.Result(True, stdout="s_new\n"))[1],
+    )
+
+    hooks.on_session_start({"session_id": "cc-root", "cwd": cwd, "source": "startup"})
+
+    start = calls[0]
+    assert start[start.index("--title") + 1] == "New session"
+    assert "--project" not in start, "a root is not a project name"
+    assert start[start.index("--workspace") + 1] == cwd, "the directory itself is still a fact"
+
+
+@pytest.mark.parametrize(
+    "cwd, expected",
+    [
+        ("/work", "work"),
+        ("/", ""),
+        ("D:\\", ""),
+        ("D:/", ""),
+        ("D:\\work", "work"),
+        ("\\work", "work"),
+        ("\\\\server\\share", ""),
+        ("\\\\server\\share\\project", "project"),
+    ],
+)
+def test_project_of_reads_both_path_flavours_the_same_way(cwd, expected) -> None:
+    assert hooks.project_of(cwd) == expected
+
+
 def test_stop_reports_a_turn_boundary_and_never_a_status(monkeypatch) -> None:
     """`Stop` is a per-reply signal, so it must not close the session (§15, §36).
 
