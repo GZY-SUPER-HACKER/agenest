@@ -232,7 +232,11 @@ def test_dismiss_needs_the_access_token_and_the_ingest_token_cannot(
 def test_dismiss_takes_an_ended_session_out_of_attention_without_moving_it(
     settings, db, broker
 ) -> None:
-    """The exit needs-attention did not have: an `interrupted` row had nothing to click.
+    """The exit needs-attention did not have: a `failed` row, or a verdict that lands after
+    the run closed, has nothing to click.
+
+    An `interrupted` row is not in the list at all (design.md §42); it is used here because it
+    pins the generic rule — dismissal never rewrites the outcome, whatever that outcome is.
 
     Dismissing records that a person *read* it. It must not rewrite the outcome, and it must
     not move the activity clock either — acknowledging is not work, the same rule heartbeats

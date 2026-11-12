@@ -166,10 +166,19 @@ export function isTaskCompleted(session: Session): boolean {
 /**
  * Does this session belong under **needs attention**?
  *
- * Four reports, and every one of them asks a human to decide something: the agent is blocked
- * on an answer (`awaiting_user`), a verdict says the work failed, the run failed, or the run
- * was interrupted with no outcome reported. A task-failed session counts regardless of
- * `status` — a completed run that failed the task is the ordinary shape (design.md §40).
+ * Three reports, and every one of them asks a human to decide something: the agent is blocked
+ * on an answer (`awaiting_user`), a verdict says the work failed, or the run failed. A
+ * task-failed session counts regardless of `status` — a completed run that failed the task is
+ * the ordinary shape (design.md §40).
+ *
+ * **`interrupted` is deliberately not one of them** (design.md §42). It says how the run
+ * stopped — "no outcome was reported" — and it is written by the connector's liveness check
+ * when a process vanishes, by a window reload, and by the close button a person already
+ * pressed. None of those leaves anything for the reader to do, so treating the status as a
+ * request turns the list into a log of run terminations: a screen of red dots that can only be
+ * dismissed one at a time. A killed run that really did leave work unfinished asks through the
+ * report that knows it — a `task_failed` verdict, which may arrive after the run closed — not
+ * through the terminal vocabulary of the process.
  *
  * `dismissed` is deliberately **not** part of the predicate: it is the reader's answer to the
  * question, not the question. Keeping them apart is what lets the detail page still say "this
@@ -179,8 +188,7 @@ export function needsAttention(session: Session): boolean {
   return (
     isAwaitingUser(session) ||
     isTaskFailed(session) ||
-    session.status === "failed" ||
-    session.status === "interrupted"
+    session.status === "failed"
   );
 }
 
@@ -198,6 +206,10 @@ export type SessionBucket = "attention" | "running" | "idle" | "finished";
  *    Finished — the history disclosure, with its status pill still saying `interrupted` or
  *    `failed`. Still running, it joins Running, because that is still the truth about it; it
  *    is only the request for attention that a person has answered (design.md §42).
+ *
+ * An `interrupted` session never takes the first branch: the status says how the run stopped,
+ * not that anything is owed to the reader, so it falls straight through to Finished and keeps
+ * its `interrupted` pill there (design.md §42).
  */
 export function sessionBucket(session: Session): SessionBucket {
   if (needsAttention(session) && !session.dismissed) return "attention";

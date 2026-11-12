@@ -12,7 +12,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "check:rail": "esbuild src/lib/rail-tree.ts --bundle --format=esm --platform=node --outfile=node_modules/.cache/rail-tree.mjs && node scripts/check-rail-tree.mjs"
+    "check:rail": "esbuild src/lib/rail-tree.ts --bundle --format=esm --platform=node --outfile=node_modules/.cache/rail-tree.mjs && node scripts/check-rail-tree.mjs",
+    "check:board": "esbuild src/lib/format.ts --bundle --format=esm --platform=node --outfile=node_modules/.cache/format.mjs && node scripts/check-board.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

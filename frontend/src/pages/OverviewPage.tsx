@@ -9,7 +9,7 @@
  * So the order of priority here is:
  *   1. blocked on the user   — nothing moves until you answer
  *   2. failed the task       — the run ended, the work did not pass
- *   3. broken sessions       — you have to act on these
+ *   3. failed runs           — the run itself broke
  *   4. running sessions      — the live board
  *   5. idle sessions         — open, but the agent is between replies
  *   6. everything finished   — collapsed behind a disclosure, because it is history
@@ -20,6 +20,12 @@
  * running, but the tile row answers "where do things stand", and one session counted in two
  * buckets makes the numbers stop adding up. A task-failed session works the same way even when
  * its status says `completed` — it is drawn under attention and *not* under finished.
+ *
+ * **`interrupted` is not in that list.** It says the run stopped without an outcome, which is
+ * what a window reload, a vanished process, or a person closing the row leaves behind — none
+ * of it asks for a decision. Those sessions join Finished with the pill still saying
+ * `interrupted`; a killed run whose work really is unfinished asks through a `task_failed`
+ * verdict (docs/design.md §42).
  *
  * A dismissed session falls through to Finished (or to Running, if it is still open): the
  * reader has answered the request for attention, and the row is history rather than a problem.
@@ -60,9 +66,10 @@ export function OverviewPage({
   // Red when something actually ended badly — a failed task counts, even if the process
   // exited 0. A board whose only problem is a session waiting on an answer is not in a bad
   // state — it is waiting on you, which is amber. Dismissed rows are not in this list, because
-  // a person has already said the board no longer has a problem there.
+  // a person has already said the board no longer has a problem there. `interrupted` is not
+  // here either: it is not in the attention list to begin with (design.md §42).
   const endedBadly = attention.some(
-    (s) => isTaskFailed(s) || s.status === "failed" || s.status === "interrupted",
+    (s) => isTaskFailed(s) || s.status === "failed",
   );
 
   return (
