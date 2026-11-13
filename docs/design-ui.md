@@ -40,7 +40,7 @@ Chrome 123+ / Safari 17.5+ / Firefox 120+。
 
 1. **一个颜色一个含义，而且颜色不单独承载含义。** 状态永远是「小圆点 + 文字」，不是卡片或行
    左侧的彩色竖条——竖条在所有尺寸上都没有了。
-2. **推断不能长得像报告。** `possibly_stale` 用空心圆点、虚线胶囊、独立措辞；只有报告出来的
+2. **推断不能长得像报告。** `disconnected` 用空心圆点、虚线胶囊、独立措辞；只有报告出来的
    状态才用实心圆点和实色填充。
 3. **没有装饰。** 不用玻璃拟态、大渐变、装饰图表、伪造进度条；只有卡片、细边框和文字层级。
 
@@ -68,9 +68,9 @@ session 只报了机器名、但那台机器的 connector 从没注册过（`cpc
 |---|---|---|
 | 绿 | **活着**：running、连接正常、all clear | `--ok` |
 | 中性（灰） | 干净地结束了，或者不知道。**默认**，故意不起眼 | `--quiet` / `--surface-2` |
-| 琥珀 | interrupted | `--warn` |
+| 琥珀 | 被问题挡住（`awaiting_user`）：唯一一个在向你要东西的状态 | `--warn` |
 | 红 | failed | `--dead` |
-| **空心** | 推断出来的，不是报告上来的（`possibly_stale`） | — |
+| **空心** | 推断出来的，不是报告上来的（`disconnected`） | — |
 
 **2026-10-18 修正。** 在此之前 `running` 有自己的蓝色（`--live`），代价是一个颜色承载了两个含
 义：详情页的状态胶囊里**绿色表示 completed**，而卡片和侧栏行里 completed 是中性默认（根本
@@ -240,13 +240,13 @@ agent 来说，它本来就一直由工具行承担（docs/design.md §23）。
 - 分区时 task-failed 从 running / idle / finished 里扣掉，保证 tile 仍然精确相加；
 - 状态胶囊不变：它说的是**进程怎么结束的**，verdict 说的是**活成没成**，两个事实都保留。
 
-### `interrupted` 不进入 needs-attention
+### 普通的 `completed` 不进入 needs-attention
 
 needs-attention 是三份报告：`awaiting_user`、`task_failed`、`failed`，每一份都留下一个要人做的决定。
-`interrupted` 不在其中（docs/design.md §42）：它说的是"进程停了、没有结果"，来源是窗口重载、
-connector 的存活探针、`--print` 探测、或者用户自己按下的 Close——没有一个是请求，最后一个是
-"我没有别的事了"的反面。这类会话直接落到 **Finished**，状态胶囊照旧写 `interrupted`；rail 的
-**Failed** 过滤器仍然包含它，因为那回答的是"哪里出了问题"，不是"现在要我做什么"。真正"活没干完"
+普通的 `completed` 不在其中（docs/design.md §42、§44）：它说的是运行到了终点——上报的结束、崩溃、
+或者用户自己按下的 Close，没有一个是请求，最后一个是"我没有别的事了"的反面。这类会话直接落到
+**Finished**，状态胶囊写着它是怎么结束的（手动关闭显示 `closed by you`）；rail 的 **Failed**
+过滤器只保留 `failed` 和 `task_failed`，因为 `stop_reason=crash` 也包含普通窗口重载。真正"活没干完"
 的情况由 `task_failed` 承担，它可以在 session 关闭之后才到（docs/design.md §40）。
 
 在云端 5880 上这条规则之前的数字：205 行里 101 行在 Needs attention，几乎全是 `interrupted`，
@@ -268,7 +268,7 @@ needs-attention 以前只能进不能出：`failed` 的行没有任何可点的�
   运行的会话，下一条 `progress` 就会重新提出请求；而 heartbeat 不会——心跳是活着，不是干活。
 - **安静，不是警报。** 和 close box 同一种卡片形状、同一套 token：dismiss 是整理，不是一个红点。
 
-`interrupted` 行不显示这个动作盒——它从来没有提出请求，也就没有什么要 dismiss。
+`completed` 行不显示这个动作盒——它从来没有提出请求，也就没有什么要 dismiss。
 
 ## 附件：卡片，不是链接
 

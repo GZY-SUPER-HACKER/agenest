@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { IconChevronDown, IconPanel } from "./icons";
-import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskFailed, relativeTime } from "../lib/format";
+import { doingLine, isAwaitingUser, isBusy, isDisconnected, isIdle, isTaskFailed, relativeTime } from "../lib/format";
 import {
   buildTree,
   HOST_STATE_LABEL,
@@ -88,7 +88,6 @@ function matchesFilter(session: Session, filter: StatusFilter): boolean {
       // "what went wrong", and a clean exit whose work failed is exactly that.
       return (
         session.status === "failed" ||
-        session.status === "interrupted" ||
         isTaskFailed(session)
       );
     case "done":
@@ -482,14 +481,14 @@ function SessionRow({
     not that nothing was heard.
   */
   const taskFailed = isTaskFailed(session);
-  const stale =
-    session.possibly_stale && isBusy(session) && !awaiting && !idle && !taskFailed;
+  const disconnected =
+    isDisconnected(session) && !awaiting && !idle && !taskFailed;
 
   return (
     <button
       className="row"
       data-status={session.status}
-      data-stale={stale}
+      data-stale={disconnected}
       data-awaiting={awaiting}
       data-idle={idle}
       data-task-failed={taskFailed}
@@ -497,8 +496,8 @@ function SessionRow({
       aria-current={active}
       onClick={() => onSelect(session.id)}
       title={
-        stale
-          ? `${session.title} — no activity for a while; the status is not inferred`
+        disconnected
+          ? `${session.title} — no heartbeat for a while; the status is not inferred`
           : session.title
       }
     >

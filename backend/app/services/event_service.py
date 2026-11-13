@@ -32,9 +32,11 @@ from ..schemas import (
     EventOut,
     EventType,
     SessionStatus,
+    StopReason,
     TERMINAL_EVENTS,
     TERMINAL_STATUSES,
     cap_string,
+    normalise_status,
     utcnow,
 )
 from . import session_service as ss
@@ -98,7 +100,7 @@ def ingest_event(
             # double-count heartbeats or re-emit a status change (spec 6.4).
             return IngestResult(
                 event=event,
-                status=SessionStatus(row["status"]),
+                status=normalise_status(row["status"])[0],
                 session_updated=False,
                 duplicate=True,
             )
@@ -108,6 +110,7 @@ def ingest_event(
             session_id=session_id,
             row=row,
             event_type=data.event_type,
+            payload=data.payload,
             received_at=received_at,
         )
 
@@ -125,9 +128,10 @@ def _apply_session_effects(
     session_id: str,
     row,
     event_type: EventType,
+    payload: dict | None,
     received_at: str,
 ) -> tuple[SessionStatus, bool]:
-    current = SessionStatus(row["status"])
+    current = normalise_status(row["status"])[0]
     sets: list[str] = []
     params: list[object] = []
     status = current
@@ -140,6 +144,13 @@ def _apply_session_effects(
         changed_status = True
         sets.extend(["status = ?", "finished_at = ?"])
         params.extend([status.value, received_at])
+        # Why it ended is data the reporter may have; a legacy `session_interrupted` means
+        # only "it stopped, nobody said why" (docs/design.md §44). First write wins, like the
+        # terminal status itself — extra heartbeats cannot rewrite a reason afterwards.
+        reason = _stop_reason(event_type, payload)
+        if reason is not None:
+            sets.append("stop_reason = ?")
+            params.append(reason.value)
     # Otherwise `status` is absent from the UPDATE on purpose. Writing `current` back looks
     # like a no-op, but it restates a value read before this transaction — and when that value
     # was already stale it reopened a completed session (docs/design.md §35). An event either
@@ -151,6 +162,10 @@ def _apply_session_effects(
         sets.append("heartbeat_count = heartbeat_count + 1")
         sets.append("last_activity_at = ?")
         params.append(max(row["last_activity_at"], received_at))
+        # Monotonic, for the same reason `last_activity_at` is: a reporter whose clock ran
+        # behind must not make the session look as if it stopped talking (docs/design.md §44).
+        sets.append("last_heartbeat_at = ?")
+        params.append(max(row["last_heartbeat_at"] or "", received_at))
     elif current is SessionStatus.running:
         sets.append("last_activity_at = ?")
         params.append(max(row["last_activity_at"], received_at))
@@ -167,6 +182,23 @@ def _apply_session_effects(
         f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", (*params, session_id)
     )
     return status, changed_status
+
+
+def _stop_reason(event_type: EventType, payload: dict | None) -> StopReason | None:
+    """The reason a terminal event carries, if it named one.
+
+    A payload value wins because a new reporter may know more than its event type says. An
+    unrecognised value is treated as silence rather than a 422: the event itself is the
+    report, and a vocabulary the server has not learned must not drop it (docs/design.md §44).
+    """
+    reported = payload.get("stop_reason") if isinstance(payload, dict) else None
+    try:
+        return StopReason(reported)
+    except (TypeError, ValueError):
+        pass
+    if event_type is EventType.session_interrupted:
+        return StopReason.unknown
+    return None
 
 
 def sanitise_payload(payload: dict | None) -> dict | None:

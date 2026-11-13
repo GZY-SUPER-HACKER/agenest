@@ -182,7 +182,9 @@ export function outcomeFor(stopReason, errorMessage) {
       return { status: 'failed', summary: `Pi run failed: ${message}` }
     }
     case 'aborted':
-      return { status: 'interrupted', summary: 'Pi run was aborted' }
+      // A person (or the editor) stopped the run: the run ended, and the reason is "user".
+      // `completed` + a reason replaces the old `interrupted` status (docs/design.md §44).
+      return { status: 'completed', stop_reason: 'user', summary: 'Pi run was aborted' }
     default:
       return {
         status: 'unknown',
@@ -266,8 +268,8 @@ export function resolveConfig(deps = {}) {
  * A settle or a shutdown is Pi finishing: the retry budget that is right for a live run (3
  * attempts with backoff) is wrong here, because it would turn a dashboard outage into a Pi that
  * hangs before exit. A close that misses the deadline is dropped; the row then goes
- * `possibly_stale` instead of `interrupted`, which is the honest rendering of a report that did
- * not arrive.
+ * `disconnected` instead of reaching a reported ending, which is the honest rendering of a
+ * report that did not arrive (§44).
  */
 async function settleBriefly(promises, milliseconds = 2000) {
   let timer
@@ -668,7 +670,7 @@ export function install(pi, deps = {}) {
     }
   }
 
-  async function closeRun(run, status, summary) {
+  async function closeRun(run, status, summary, stopReason) {
     stopTimer(run.heartbeat)
     run.heartbeat = null
     if (run.closed) return
@@ -680,11 +682,12 @@ export function install(pi, deps = {}) {
       // create a fresh one, and a late `PATCH` would be more confusing than the gap.
       return
     }
+    const body = { status, summary: cap(summary, MAX_SUMMARY) }
+    // Only a terminal status may carry a reason; the server refuses one on a running row
+    // (docs/design.md §44). Omitted is honest: the run ended and nobody said why.
+    if (stopReason) body.stop_reason = stopReason
     try {
-      await client.updateSession(run.csdId, {
-        status,
-        summary: cap(summary, MAX_SUMMARY),
-      })
+      await client.updateSession(run.csdId, body)
       info(`pi-csd-reporter: ${run.csdId} -> ${status}`)
     } catch (error) {
       warn(`pi-csd-reporter: could not close ${run.csdId}: ${error?.message ?? error}`)
@@ -720,7 +723,7 @@ export function install(pi, deps = {}) {
     const leftover = current
     if (leftover && !leftover.closed) {
       enqueue(leftover, () =>
-        closeRun(leftover, 'interrupted', 'Pi started a new session before the run settled'),
+        closeRun(leftover, 'completed', 'Pi started a new session before the run settled', 'crash'),
       )
     }
     stopTimer(hostHeartbeat)
@@ -759,7 +762,7 @@ export function install(pi, deps = {}) {
     const run = current
     if (!run || run.closed) return
     const outcome = outcomeFor(run.stopReason, run.errorMessage)
-    await settleBriefly([enqueue(run, () => closeRun(run, outcome.status, outcome.summary))])
+    await settleBriefly([enqueue(run, () => closeRun(run, outcome.status, outcome.summary, outcome.stop_reason))])
   })
 
   on('session_shutdown', async (_event, _ctx) => {
@@ -769,7 +772,7 @@ export function install(pi, deps = {}) {
     if (!run || run.closed) return
     await settleBriefly([
       enqueue(run, () =>
-        closeRun(run, 'interrupted', 'Pi switched or exited before the run settled'),
+        closeRun(run, 'completed', 'Pi switched or exited before the run settled', 'crash'),
       ),
     ])
     // No goodbye is sent for the host: a Pi restart or a /new is not an uninstall, and silence
@@ -790,7 +793,7 @@ export function install(pi, deps = {}) {
     timers.clear()
     const run = current
     if (run && !run.closed) {
-      await settleBriefly([enqueue(run, () => closeRun(run, 'interrupted', 'Pi exited before the run settled'))])
+      await settleBriefly([enqueue(run, () => closeRun(run, 'completed', 'Pi exited before the run settled', 'crash'))])
     }
     current = null
     clearSessionMap(run)

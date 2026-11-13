@@ -120,10 +120,9 @@
   background: var(--dead-soft);
   color: var(--dead);
 }
-.status[data-status="interrupted"] {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
+/* No rule for a closed run either: `completed` (reported, crashed, or closed by a person)
+   takes the neutral base. The word on the pill distinguishes them — a green tick would
+   claim an outcome nobody reported (docs/design.md §44). */
 
 /* Between replies: reported (Claude Code said the reply ended), so it keeps a fill rather
    than the dashed stale treatment — but it is not alive, so it does not get the running

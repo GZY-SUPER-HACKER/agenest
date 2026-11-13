@@ -114,7 +114,8 @@ def run(verbose: bool = False) -> int:
         # Gone. Report the closure rather than leaving it at `running` forever.
         result = runtime.cpctl(
             "session", "finish", "--session", entry.csd_session_id,
-            "--status", "interrupted",
+            "--status", "completed",
+            "--stop-reason", "crash",
             "--summary", f"Claude Code process {entry.pid} is gone; no SessionEnd was fired",
         )
         if result.ok:

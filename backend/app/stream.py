@@ -65,12 +65,17 @@ def session_frame(session: SessionOut) -> dict:
             "status": session.status.value,
             "started_at": session.started_at,
             "last_activity_at": session.last_activity_at,
+            "last_heartbeat_at": session.last_heartbeat_at,
             "finished_at": session.finished_at,
             "summary": session.summary,
             "exit_code": session.exit_code,
+            "stop_reason": session.stop_reason.value if session.stop_reason else None,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
             "possibly_stale": session.possibly_stale,
+            # The same fact under the name the page uses. Both travel for one release so a
+            # client that has not been updated does not lose the hint (§44).
+            "disconnected": session.disconnected,
             "last_event": (
                 session.last_event.model_dump(mode="json")
                 if session.last_event is not None

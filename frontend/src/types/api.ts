@@ -1,17 +1,25 @@
 /**
  * Wire types, mirroring `backend/app/schemas.py`.
  *
- * The one thing to keep in mind: `possibly_stale` is a **display hint the server computed
- * for this response**, not a stored status. The status field is always the truth; this flag
- * is how the spec's "可能失联" requirement is satisfied without ever lying about state.
+ * The one thing to keep in mind: `disconnected` (and its deprecated alias
+ * `possibly_stale`) is a **display hint the server computed for this response**, not a
+ * stored status. The status field is always the truth; this flag is how the spec's "可能失联"
+ * requirement is satisfied without ever lying about state.
  */
 
+/**
+ * `completed` is neutral on purpose: it says the run reached an ending, not that the work
+ * succeeded. Whether it did is a task verdict (`task_completed` / `task_failed`), and *who
+ * or what stopped it* is `stop_reason` (docs/design.md §44).
+ */
 export type SessionStatus =
   | "running"
   | "completed"
   | "failed"
-  | "interrupted"
   | "unknown";
+
+/** Why a run ended. `null` while running, and on a terminal row nobody explained. */
+export type StopReason = "user" | "crash" | "unknown";
 
 export type EventType =
   | "session_started"
@@ -53,12 +61,26 @@ export interface Session {
   status: SessionStatus;
   started_at: string;
   last_activity_at: string;
+  /** The newest heartbeat received, or `null` for a reporter that sends none. */
+  last_heartbeat_at: string | null;
   finished_at: string | null;
   summary: string | null;
   exit_code: number | null;
+  /** Why the run ended, when a reporter said. Displayed as a word, never as a status. */
+  stop_reason: StopReason | null;
   created_at: string;
   updated_at: string;
+  /**
+   * @deprecated Equal to `disconnected`; kept for one release so an older client does not
+   * lose the hint. Read `disconnected` instead (docs/design.md §44).
+   */
   possibly_stale: boolean;
+  /**
+   * A running session that has gone quiet past the threshold — judged on `last_heartbeat_at`
+   * when it exists, and on `last_activity_at` otherwise. Derived per response and reversible:
+   * one heartbeat makes it false again.
+   */
+  disconnected: boolean;
   /**
    * The newest non-heartbeat event, so a row can say what a session is *doing* without
    * fetching it. `null` for a session that has only ever reported a heartbeat.

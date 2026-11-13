@@ -9,7 +9,7 @@
  * It exists because a wrong predicate does not crash. It renders a plausible board — every
  * session still has a card, every tile still has a number — and the error is only visible as a
  * feeling that the list is too long. The rule pinned here is the one that changed on
- * 2026-11-12 (docs/design.md §42): `interrupted` is a statement about how the run stopped, not
+ * 2026-11-13 (docs/design.md §44): `completed` is a statement about how the run stopped, not
  * a request for a decision, so it must not enter needs-attention — and removing it must leave
  * the tile row a partition (running + idle + attention + finished = total).
  */
@@ -43,12 +43,15 @@ const session = (o = {}) => ({
   status: o.status ?? "running",
   started_at: "t",
   last_activity_at: "t",
+  last_heartbeat_at: o.last_heartbeat_at ?? null,
   finished_at: null,
   summary: null,
   exit_code: null,
+  stop_reason: o.stop_reason ?? null,
   created_at: "t",
   updated_at: "t",
   possibly_stale: false,
+  disconnected: o.disconnected ?? false,
   last_event: o.last_event ?? null,
   last_verdict: o.last_verdict ?? null,
   dismissed: o.dismissed ?? false,
@@ -64,27 +67,29 @@ const check = (label, actual, expected) => {
 
 console.log("--- what asks for a decision ---");
 
-// The change this file was written for. Three ordinary shapes of `interrupted`, and the pill
-// must still tell the reader how the run ended.
-const vscodeReload = session({ status: "interrupted" });
-const livenessCheck = session({ status: "interrupted" });
-const closedByHand = session({ status: "interrupted" });
-check("a plain interrupted session does not ask for attention",
-  [needsAttention(vscodeReload), needsAttention(livenessCheck), needsAttention(closedByHand)],
+// A run that reached an ending, however it ended. None of the three asks for a decision, and
+// the pill must still say what happened.
+const reported = session({ status: "completed" });
+const crashed = session({ status: "completed", stop_reason: "crash" });
+const closedByHand = session({ status: "completed", stop_reason: "user" });
+check("a completed session does not ask for attention",
+  [needsAttention(reported), needsAttention(crashed), needsAttention(closedByHand)],
   [false, false, false]);
 check("...and it lands in Finished, not attention",
-  [sessionBucket(vscodeReload), sessionBucket(livenessCheck), sessionBucket(closedByHand)],
+  [sessionBucket(reported), sessionBucket(crashed), sessionBucket(closedByHand)],
   ["finished", "finished", "finished"]);
-check("...with its status pill still saying interrupted",
-  statusLabel(vscodeReload), "interrupted");
+check("...with a reported completion saying so",
+  statusLabel(reported), "completed");
+check("...and a hand-closed row saying who closed it",
+  statusLabel(closedByHand), "closed by you");
 check("...and no dismissal is needed to get it there (dismissed changes nothing)",
-  [sessionBucket(session({ status: "interrupted", dismissed: true })), needsAttention(session({ status: "interrupted", dismissed: true }))],
+  [sessionBucket(session({ status: "completed", dismissed: true })), needsAttention(session({ status: "completed", dismissed: true }))],
   ["finished", false]);
 
 // The report that *does* know the work did not pass. It may arrive after the run closed, which
 // is exactly why it is projected separately from `last_event` (§40).
-const killedButFailed = session({ status: "interrupted", last_verdict: ev("task_failed") });
-check("an interrupted run with a task_failed verdict still asks",
+const killedButFailed = session({ status: "completed", last_verdict: ev("task_failed") });
+check("a closed run with a task_failed verdict still asks",
   [needsAttention(killedButFailed), sessionBucket(killedButFailed)], [true, "attention"]);
 check("...and dismissing it moves it to Finished",
   sessionBucket({ ...killedButFailed, dismissed: true }), "finished");
@@ -103,9 +108,9 @@ check("a task_completed verdict does not change the bucket",
 
 // `awaiting_user` must not outlive the process: a dead session cannot receive the answer, and
 // a late event must not park a finished row at the top of the board (§16b).
-check("a waiting event on an interrupted session is not waiting",
-  [isAwaitingUser(session({ status: "interrupted", last_event: ev("awaiting_user") })),
-   sessionBucket(session({ status: "interrupted", last_event: ev("awaiting_user") }))],
+check("a waiting event on a completed session is not waiting",
+  [isAwaitingUser(session({ status: "completed", last_event: ev("awaiting_user") })),
+   sessionBucket(session({ status: "completed", last_event: ev("awaiting_user") }))],
   [false, "finished"]);
 
 // A dismissed request that is still running falls through to Running — it is still open, only
@@ -135,7 +140,7 @@ const board = [
   session({ id: "task-failed-1", status: "completed", last_verdict: ev("task_failed") }),
   session({ id: "completed-1", status: "completed" }),
   session({ id: "unknown-1", status: "unknown" }),
-  ...Array.from({ length: 10 }, (_, i) => session({ id: `interrupted-${i}`, status: "interrupted" })),
+  ...Array.from({ length: 10 }, (_, i) => session({ id: `completed-${i}`, status: "completed" })),
 ];
 
 const buckets = ["attention", "running", "idle", "finished"];
@@ -146,7 +151,7 @@ const seen = board.reduce((n, s) => n + Number(buckets.includes(sessionBucket(s)
 check("every session lands in exactly one bucket", seen, board.length);
 check("the four tiles add up to the total",
   buckets.reduce((n, b) => n + counts[b], 0), board.length);
-check("interrupted rows contribute to Finished alone",
+check("completed rows contribute to Finished alone",
   [counts.attention, counts.finished], [3, 12]);
 check("the attention tile holds only the three reports",
   board.filter((s) => sessionBucket(s) === "attention").map((s) => s.id).sort(),

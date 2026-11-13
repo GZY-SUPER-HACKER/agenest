@@ -161,8 +161,15 @@ def test_close_needs_the_access_token_and_the_ingest_token_cannot(settings, db, 
         assert c.post(f"/api/sessions/{sid}/close", headers=READ).status_code == 200
 
 
-def test_close_marks_a_running_session_interrupted(settings, db, broker) -> None:
-    """`interrupted`, never `completed` — the honest claim is "stopped, outcome unknown"."""
+def test_close_marks_a_running_session_completed_with_the_user_as_reason(
+    settings, db, broker
+) -> None:
+    """`completed` + `stop_reason=user` — the status says it ended, the reason says who.
+
+    It must not be `failed` (nothing went wrong) and it must not be a bare `completed` (the
+    green check belongs to a reporter's outcome, not to a person tidying the board). The
+    reason is what keeps those two apart without a sixth status (docs/design.md §44).
+    """
     from dataclasses import replace
 
     from app.main import create_app
@@ -172,12 +179,16 @@ def test_close_marks_a_running_session_interrupted(settings, db, broker) -> None
         sid = _make_session(c)
 
         body = c.post(f"/api/sessions/{sid}/close", headers=READ).json()
-        assert body["status"] == "interrupted"
+        assert body["status"] == "completed"
+        assert body["stop_reason"] == "user"
+        assert body["finished_at"] is not None
         assert "Closed from the dashboard" in body["summary"]
 
-        # A human decision should be visible in the timeline, not only in the status field.
+        # A human decision should be visible in the timeline, not only in the fields — and
+        # the reason travels with it, so the timeline can say *who* ended the run.
         events = c.get(f"/api/sessions/{sid}/events", headers=READ).json()["events"]
-        assert any(e["event_type"] == "status_changed" for e in events)
+        changed = [e for e in events if e["event_type"] == "status_changed"]
+        assert changed and changed[0]["payload"]["stop_reason"] == "user"
 
 
 def test_close_cannot_reopen_a_finished_session(settings, db, broker) -> None:
@@ -239,7 +250,7 @@ def test_dismiss_takes_an_ended_session_out_of_attention_without_moving_it(
     """The exit needs-attention did not have: a `failed` row, or a verdict that lands after
     the run closed, has nothing to click.
 
-    An `interrupted` row is not in the list at all (design.md §42); it is used here because it
+    A `completed` row is not in the list at all (design.md §42); it is used here because it
     pins the generic rule — dismissal never rewrites the outcome, whatever that outcome is.
 
     Dismissing records that a person *read* it. It must not rewrite the outcome, and it must
@@ -255,13 +266,16 @@ def test_dismiss_takes_an_ended_session_out_of_attention_without_moving_it(
         sid = _make_session(c)
         assert report(c, sid, "progress", "halfway").status_code == 202
         before = c.patch(
-            f"/api/sessions/{sid}", json={"status": "interrupted"}, headers=INGEST
+            f"/api/sessions/{sid}",
+            json={"status": "completed", "stop_reason": "crash"},
+            headers=INGEST,
         ).json()
         assert before["dismissed"] is False
 
         body = c.post(f"/api/sessions/{sid}/dismiss", headers=READ).json()
         assert body["dismissed"] is True
-        assert body["status"] == "interrupted"
+        assert body["status"] == "completed"
+        assert body["stop_reason"] == "crash"
         assert body["updated_at"] == before["updated_at"]
         assert body["last_activity_at"] == before["last_activity_at"]
 
@@ -589,22 +603,226 @@ def test_heartbeat_is_not_the_last_display_event(
 
 
 # --------------------------------------------------------------------------- #
-# staleness (spec 4.2, item 8)
+# the quiet clock: `disconnected` is derived, and reversible (design.md §44)
 # --------------------------------------------------------------------------- #
-def test_stale_running_session_is_flagged(session_id: str, client: TestClient, db) -> None:
-    """A quiet session is labelled, never silently marked failed."""
-    db.execute("UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", (session_id,))
-    detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
-    assert detail["possibly_stale"] is True
-    assert detail["status"] == "running"
+def test_a_quiet_session_is_disconnected_and_a_heartbeat_clears_it(
+    session_id: str, client: TestClient, db
+) -> None:
+    """The acceptance core: the state is derived from silence, and it undoes itself.
+
+    Nothing writes `disconnected`. It is computed per response from
+    `last_heartbeat_at`, so one arriving heartbeat returns the row to `running` with no
+    background job and no "un-disconnect" write — the same shape `possibly_stale` had, on the
+    clock that actually answers "is the agent there?".
+    """
+    report(client, session_id, "heartbeat", "alive")
+    db.execute(
+        "UPDATE sessions SET last_heartbeat_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        (session_id,),
+    )
+
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["disconnected"] is True
+    assert body["possibly_stale"] is True  # deprecated alias, same value
+    assert body["status"] == "running"
+
+    assert report(client, session_id, "heartbeat", "alive again").status_code == 202
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["disconnected"] is False
+    assert body["status"] == "running"
 
 
-def test_finished_session_is_never_stale(session_id: str, client: TestClient, db) -> None:
+def test_a_reporter_without_heartbeats_falls_back_to_activity(
+    session_id: str, client: TestClient, db
+) -> None:
+    """No heartbeat mechanism is not a stopped heartbeat.
+
+    A hand-run `cpctl` session, and parts of the Pi/DSH reporting shapes, send no heartbeat
+    at all. Judging those by `last_heartbeat_at` would turn "never had this feature" into
+    "lost the agent" — every such row would go grey on the day this shipped.
+    """
+    report(client, session_id, "progress", "still working")
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["last_heartbeat_at"] is None
+    assert body["disconnected"] is False
+
+    # With no heartbeat to use, the activity clock is the honest one.
+    db.execute(
+        "UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        (session_id,),
+    )
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["disconnected"] is True
+    assert body["status"] == "running"
+
+
+def test_finished_session_is_never_disconnected(
+    session_id: str, client: TestClient, db
+) -> None:
     report(client, session_id, "session_completed", "done")
-    db.execute("UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?", (session_id,))
+    db.execute(
+        "UPDATE sessions SET last_heartbeat_at = '2020-01-01T00:00:00.000Z', "
+        "last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+        (session_id,),
+    )
     detail = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert detail["disconnected"] is False
     assert detail["possibly_stale"] is False
     assert detail["status"] == "completed"
+
+
+# --------------------------------------------------------------------------- #
+# legacy agents: `interrupted` is translated on the way in (§44)
+# --------------------------------------------------------------------------- #
+def test_a_legacy_interrupted_patch_is_accepted_and_translated(
+    session_id: str, client: TestClient
+) -> None:
+    """An old `cpctl` still sends this. A 422 would make it retry forever."""
+    r = client.patch(
+        f"/api/sessions/{session_id}", json={"status": "interrupted"}, headers=INGEST
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["stop_reason"] == "unknown"
+
+
+def test_a_legacy_session_interrupted_event_is_accepted(
+    session_id: str, client: TestClient
+) -> None:
+    r = report(client, session_id, "session_interrupted", "process went away")
+    assert r.status_code == 202
+    body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
+    assert body["status"] == "completed"
+    assert body["stop_reason"] == "unknown"
+
+
+def test_a_legacy_interrupted_create_is_accepted(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        "/api/sessions",
+        json={"agent_type": "codex", "title": "late", "status": "interrupted"},
+        headers=INGEST,
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["stop_reason"] == "unknown"
+
+
+def test_stop_reason_is_first_write_wins(session_id: str, client: TestClient) -> None:
+    """A late crash report must not overwrite the human who pressed close (§44)."""
+    report(
+        client,
+        session_id,
+        "session_completed",
+        "closed",
+        payload={"stop_reason": "user"},
+    )
+    body = client.patch(
+        f"/api/sessions/{session_id}", json={"stop_reason": "crash"}, headers=INGEST
+    ).json()
+    assert body["status"] == "completed"
+    assert body["stop_reason"] == "user"
+
+
+def test_stop_reason_is_not_written_onto_a_running_row(
+    session_id: str, client: TestClient
+) -> None:
+    """A reason describes an ending; a running row has not had one."""
+    body = client.patch(
+        f"/api/sessions/{session_id}", json={"stop_reason": "crash"}, headers=INGEST
+    ).json()
+    assert body["status"] == "running"
+    assert body["stop_reason"] is None
+
+
+def test_closing_does_not_count_as_a_heartbeat(
+    settings, db, broker
+) -> None:
+    """Closing records an ending, not liveness — the clock must not move."""
+    from dataclasses import replace
+
+    from app.main import create_app
+
+    locked = replace(settings, dashboard_token=DASH_TOKEN)
+    with TestClient(create_app(settings=locked, db=db, broker=broker)) as c:
+        sid = _make_session(c)
+        report(c, sid, "heartbeat", "alive")
+        before = c.get(f"/api/sessions/{sid}", headers=READ).json()["last_heartbeat_at"]
+
+        body = c.post(f"/api/sessions/{sid}/close", headers=READ).json()
+        assert body["status"] == "completed"
+        assert body["stop_reason"] == "user"
+        assert body["last_heartbeat_at"] == before
+
+
+# --------------------------------------------------------------------------- #
+# migration: additive, idempotent, and backfilled once (§44)
+# --------------------------------------------------------------------------- #
+def test_migration_adds_columns_and_backfills_last_heartbeat_once(tmp_path: Path) -> None:
+    """A deployed database has the old shape; the two new columns must appear on boot.
+
+    The backfill matters as much as the ALTER: without it every historical running row reads
+    as `disconnected` on the first response, because NULL is indistinguishable from "the
+    heartbeat stopped". `IS NULL` makes the second boot a no-op.
+    """
+    path = tmp_path / "legacy.sqlite3"
+    first = Database(path)
+    first.execute(
+        "INSERT INTO sessions (id, agent_type, title, status, started_at, "
+        "last_activity_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "s_legacy",
+            "claude_code",
+            "old",
+            "running",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+        ),
+    )
+    first.execute(
+        "INSERT INTO session_events (session_id, event_type, message, occurred_at, "
+        "received_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            "s_legacy",
+            "heartbeat",
+            "alive",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+        ),
+    )
+    first.close()
+
+    # Make it look like the deployed database: the old table, without the new columns.
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE sessions DROP COLUMN last_heartbeat_at")
+    conn.execute("ALTER TABLE sessions DROP COLUMN stop_reason")
+    conn.commit()
+    conn.close()
+
+    second = Database(path)
+    row = second.query_one(
+        "SELECT last_heartbeat_at, stop_reason FROM sessions WHERE id = 's_legacy'"
+    )
+    assert row["last_heartbeat_at"] == "2026-01-01T00:00:00.000Z"
+    assert row["stop_reason"] is None
+    second.execute(
+        "UPDATE sessions SET last_heartbeat_at = '2026-02-02T00:00:00.000Z' "
+        "WHERE id = 's_legacy'"
+    )
+    second.close()
+
+    third = Database(path)
+    row = third.query_one(
+        "SELECT last_heartbeat_at FROM sessions WHERE id = 's_legacy'"
+    )
+    # A non-NULL value is not re-derived, so a second boot cannot move it backward.
+    assert row["last_heartbeat_at"] == "2026-02-02T00:00:00.000Z"
+    third.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -685,7 +903,10 @@ def test_last_event_ignores_status_changed(
         f"/api/sessions/{session_id}", json={"status": "interrupted"}, headers=INGEST
     )
     body = client.get(f"/api/sessions/{session_id}", headers=READ).json()
-    assert body["status"] == "interrupted"
+    # `interrupted` is still accepted from a legacy `cpctl`, and translated on the way in
+    # (docs/design.md §44): the row is closed, and nobody said why.
+    assert body["status"] == "completed"
+    assert body["stop_reason"] == "unknown"
     assert body["last_event"]["message"] == "writing the patch"
 
 

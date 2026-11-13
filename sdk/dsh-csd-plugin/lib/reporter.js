@@ -87,15 +87,29 @@ export function turnOutcome(reason) {
       return { status: 'failed', summary: `DSH turn failed${code}: ${message}` }
     }
     case 'aborted':
-      return { status: 'interrupted', summary: `DSH turn aborted (${cancelCause(reason.reason)})` }
+      // The turn ended and someone/something stopped it. `completed` + a reason replaces the
+      // old `interrupted` status; the run still finished, the reason says who ended it (§44).
+      return {
+        status: 'completed',
+        stop_reason: 'crash',
+        summary: `DSH turn aborted (${cancelCause(reason.reason)})`,
+      }
     case 'blocked':
       // The prompt was refused before the first step; no model work happened.
-      return { status: 'interrupted', summary: 'DSH turn was blocked before the first step' }
+      return {
+        status: 'completed',
+        stop_reason: 'crash',
+        summary: 'DSH turn was blocked before the first step',
+      }
     case 'max-tokens':
       // The turn did finish; its last step merely hit the provider's output ceiling.
       return { status: 'completed', summary: 'DSH turn completed at the output-token ceiling' }
     case 'interrupted':
-      return { status: 'interrupted', summary: 'DSH closed a crash-orphaned turn on reload' }
+      return {
+        status: 'completed',
+        stop_reason: 'crash',
+        summary: 'DSH closed a crash-orphaned turn on reload',
+      }
     default:
       return { status: 'unknown', summary: `DSH turn ended with an unrecognized reason: ${kind}` }
   }

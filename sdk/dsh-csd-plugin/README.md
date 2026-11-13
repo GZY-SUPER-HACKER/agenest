@@ -6,8 +6,9 @@ surface: the dashboard never calls into DSH, and this plugin only says what DSH 
 
 A DSH conversation is not a session on the dashboard. A **turn** is: it opens when the loop
 claims input and closes with a reason DSH writes to its durable log (`turn/end.reason`). That
-gives every row a real verdict — `completed`, `failed`, or `interrupted` — instead of a
-conversation that would look `running` until the process died.
+gives every row a real verdict — `completed`, `failed`, or `unknown`, with `stop_reason` saying
+who or what ended an aborted turn — instead of a conversation that would look `running` until
+the process died.
 
 ## Install
 
@@ -111,9 +112,9 @@ Optional config keys (all optional):
 | `user-questions/request` | an `awaiting_user` event; the request is delegated to DSH unchanged |
 | `turn/end` `completed` | closes `completed` |
 | `turn/end` `error` | closes `failed`, quoting DSH's error code and message |
-| `turn/end` `aborted` / `blocked` / `interrupted` | closes `interrupted` |
+| `turn/end` `aborted` / `blocked` / `interrupted` | closes `completed` + `stop_reason=crash` |
 | `turn/end` `max-tokens` | closes `completed`, noting the output ceiling |
-| `session/disposed` mid-turn | closes `interrupted` — the disposal is the report |
+| `session/disposed` mid-turn | closes `completed` + `stop_reason=crash` — the disposal is the report |
 | host at boot and every 5 minutes | a connected host row, `wants_access: false` |
 
 An end reason this build does not recognize closes the session as **`unknown`**, not as

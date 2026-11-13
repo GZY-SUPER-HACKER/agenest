@@ -3,7 +3,8 @@
 Rules asserted in tests/test_sessions.py:
 
 - **Terminal states are sticky.** A late event or patch cannot move a session out of
-  completed/failed/interrupted (spec 6.4, acceptance §12).
+  completed/failed (spec 6.4, acceptance §12), and `stop_reason` is first-write-wins with it
+  (docs/design.md §44).
 - **`unknown` is a wall for automatic transitions, not a downgrade.** An operator who set
   `unknown` said "I do not know"; an automated event must not answer that for them.
   An *explicit* patch is still allowed, and `unknown → running` is allowed (resumed work).
@@ -29,8 +30,10 @@ from ..schemas import (
     SessionOut,
     SessionPatch,
     SessionStatus,
+    StopReason,
     TERMINAL_STATUSES,
     TERMINAL_STATUS_TO_EVENT,
+    normalise_status,
     parse_any_timestamp,
     utcnow,
 )
@@ -52,6 +55,10 @@ def _row_to_event(row) -> EventOut:
 
 
 def _row_to_session(row, *, possibly_stale: bool = False, last_event=None) -> SessionOut:
+    # Old rows still store `interrupted`; it is translated on the way out rather than
+    # rewritten in place (§44), so the archive keeps what the reporter actually said.
+    status, legacy_reason = normalise_status(row["status"])
+    stop_reason = row["stop_reason"] or (legacy_reason.value if legacy_reason else None)
     return SessionOut(
         id=row["id"],
         agent_type=row["agent_type"],
@@ -59,15 +66,18 @@ def _row_to_session(row, *, possibly_stale: bool = False, last_event=None) -> Se
         project_name=row["project_name"],
         workspace=row["workspace"],
         host=row["host"],
-        status=row["status"],
+        status=status,
         started_at=row["started_at"],
         last_activity_at=row["last_activity_at"],
+        last_heartbeat_at=row["last_heartbeat_at"],
         finished_at=row["finished_at"],
         summary=row["summary"],
         exit_code=row["exit_code"],
+        stop_reason=stop_reason,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         possibly_stale=possibly_stale,
+        disconnected=possibly_stale,
         last_event=last_event,
     )
 
@@ -242,9 +252,7 @@ def get_session_detail(
     if row is None:
         return None
     detail = _row_to_detail(row)
-    if stale_after_seconds > 0 and detail.status is SessionStatus.running:
-        quiet = (datetime.now(timezone.utc) - _to_dt(detail.last_activity_at)).total_seconds()
-        detail.possibly_stale = quiet >= stale_after_seconds
+    _apply_quiet_hint([row], [detail], stale_after_seconds=stale_after_seconds)
     # Populate last_event here too, not just on the list path — the field is declared on
     # the shared schema, and a detail response that always had it null would be a lie about
     # the shape of the API.
@@ -252,18 +260,44 @@ def get_session_detail(
     return detail
 
 
+def _quiet_seconds(row, now: datetime) -> float:
+    """How long this session has been silent, on the clock that answers the question.
+
+    A session with a heartbeat record is judged by `last_heartbeat_at`, because that is the
+    agent's own positive claim that it is alive. A session with no heartbeat record at all
+    falls back to `last_activity_at`: a hand-run `cpctl` session has no heartbeat mechanism,
+    and reading that absence as a stopped heartbeat would grey out every such row the moment
+    this shipped (docs/design.md §44).
+
+    The fallback is not leniency — it is the difference between two different questions.
+    """
+    clock = row["last_heartbeat_at"] or row["last_activity_at"]
+    return (now - _to_dt(clock)).total_seconds()
+
+
+def _apply_quiet_hint(rows, sessions, *, stale_after_seconds: int) -> None:
+    """Project `disconnected` / `possibly_stale` onto the sessions that are still running.
+
+    One function for the list, the detail and every SSE frame: a second copy of this rule is
+    how the same session ends up drawing a hollow dot on one screen and a solid one on the
+    other (docs/design.md §44).
+    """
+    if stale_after_seconds <= 0:
+        return
+    now = datetime.now(timezone.utc)
+    for row, session in zip(rows, sessions):
+        if session.status is not SessionStatus.running:
+            continue
+        quiet = _quiet_seconds(row, now) >= stale_after_seconds
+        session.disconnected = quiet
+        session.possibly_stale = quiet
+
+
 def _with_staleness(rows, *, stale_after_seconds: int) -> list[SessionOut]:
     if not rows:
         return []
     sessions = [_row_to_session(r) for r in rows]
-    if stale_after_seconds <= 0:
-        return sessions
-    now = datetime.now(timezone.utc)
-    for session in sessions:
-        if session.status is not SessionStatus.running:
-            continue
-        quiet = (now - _to_dt(session.last_activity_at)).total_seconds()
-        session.possibly_stale = quiet >= stale_after_seconds
+    _apply_quiet_hint(rows, sessions, stale_after_seconds=stale_after_seconds)
     return sessions
 
 
@@ -424,8 +458,8 @@ def create_session(db: Database, data: SessionCreate) -> tuple[SessionOut, Event
             INSERT INTO sessions (
                 id, agent_type, title, project_name, workspace, host, status,
                 started_at, last_activity_at, finished_at, summary, exit_code,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                stop_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -440,6 +474,7 @@ def create_session(db: Database, data: SessionCreate) -> tuple[SessionOut, Event
                 now if terminal else None,
                 None,
                 None,
+                data.stop_reason.value if terminal and data.stop_reason else None,
                 now,
                 now,
             ),
@@ -460,7 +495,15 @@ def create_session(db: Database, data: SessionCreate) -> tuple[SessionOut, Event
                 session_id=session_id,
                 event_type=TERMINAL_STATUS_TO_EVENT[data.status],
                 message=f"Reported after the fact as {data.status.value}",
-                payload={"status": data.status.value, "source": "create"},
+                payload={
+                    "status": data.status.value,
+                    "source": "create",
+                    **(
+                        {"stop_reason": data.stop_reason.value}
+                        if data.stop_reason
+                        else {}
+                    ),
+                },
                 event_key=None,
                 occurred_at=last_activity,
                 received_at=now,
@@ -497,7 +540,7 @@ def patch_session(db: Database, session_id: str, data: SessionPatch):
         row = get_session_row(db, session_id)
         if row is None:
             return None, False
-        current = SessionStatus(row["status"])
+        current, _legacy = normalise_status(row["status"])
 
         sets: list[str] = []
         params: list[object] = []
@@ -520,6 +563,15 @@ def patch_session(db: Database, session_id: str, data: SessionPatch):
             params.extend(
                 [data.status.value, now if data.status in TERMINAL_STATUSES else row["finished_at"]]
             )
+
+        # A reason describes an ending, so it is written only on a row that has one. The
+        # first reason wins for the same reason the first terminal status does (§44): a late
+        # crash report must not overwrite the human who pressed close.
+        if data.stop_reason is not None and row["stop_reason"] is None:
+            target = data.status if data.status is not None else current
+            if target in TERMINAL_STATUSES:
+                sets.append("stop_reason = ?")
+                params.append(data.stop_reason.value)
 
         if data.title is not None:
             sets.append("title = ?")
@@ -554,7 +606,15 @@ def patch_session(db: Database, session_id: str, data: SessionPatch):
                 session_id=session_id,
                 event_type=EventType.status_changed,
                 message=f"Status changed to {transition[1].value}",
-                payload={"from": transition[0].value, "to": transition[1].value},
+                payload={
+                    "from": transition[0].value,
+                    "to": transition[1].value,
+                    **(
+                        {"stop_reason": data.stop_reason.value}
+                        if data.stop_reason and transition[1] in TERMINAL_STATUSES
+                        else {}
+                    ),
+                },
                 event_key=None,
                 occurred_at=now,
                 received_at=now,

@@ -103,7 +103,7 @@ SEED = [
         "pi",
         "billing",
         "Read the provider adapter boundary",
-        "interrupted",
+        "closed_by_user",
         ["Read the four contracts in CONTEXT.md", "Start on schema-migrations.ts"],
     ),
     (
@@ -277,10 +277,15 @@ def main() -> None:
                     "event_key": f"seed-task-done-{sid}",
                 },
             )
-        elif terminal_status == "interrupted":
+        elif terminal_status == "closed_by_user":
+            # A person tidied the board: the run ended, and the reason says who (§44).
             httpx.patch(
                 f"{BASE}/api/sessions/{sid}",
-                json={"status": "interrupted", "summary": "被叫停了，回头再看"},
+                json={
+                    "status": "completed",
+                    "stop_reason": "user",
+                    "summary": "被叫停了，回头再看",
+                },
                 headers=H,
                 timeout=10,
             )

@@ -399,7 +399,8 @@ test('an unpaired new turn closes the previous row instead of leaving it running
   await handle.flush()
 
   assert.deepEqual(client.of('update')[0].body, {
-    status: 'interrupted',
+    status: 'completed',
+    stop_reason: 'crash',
     summary: 'DSH opened a new turn before the previous one ended',
   })
   assert.equal(client.of('create').length, 2)
@@ -475,7 +476,7 @@ test('a title event for this turn’s own prompt is applied', async () => {
   assert.ok(titles.includes('A generated title'))
 })
 
-test('a disposed DSH session closes its open turn as interrupted', async () => {
+test('a disposed DSH session closes its open turn as crashed', async () => {
   const { ctx, client, handle } = setup()
   ctx.emit('session/event', SESSION, event('turn/start', { turn: 1 }))
   await handle.flush()
@@ -483,7 +484,8 @@ test('a disposed DSH session closes its open turn as interrupted', async () => {
   await handle.flush()
 
   assert.deepEqual(client.of('update')[0].body, {
-    status: 'interrupted',
+    status: 'completed',
+    stop_reason: 'crash',
     summary: 'DSH disposed the session before the turn reported an end',
   })
 })
@@ -549,5 +551,6 @@ test('dispose closes an open turn and stops timers', async () => {
   await ctx.effects[0]()
   await handle.flush()
 
-  assert.equal(client.of('update')[0].body.status, 'interrupted')
+  assert.equal(client.of('update')[0].body.status, 'completed')
+  assert.equal(client.of('update')[0].body.stop_reason, 'crash')
 })

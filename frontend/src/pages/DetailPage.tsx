@@ -29,6 +29,7 @@ import {
   eventKind,
   isAwaitingUser,
   isBusy,
+  isDisconnected,
   isIdle,
   isTaskCompleted,
   isTaskFailed,
@@ -84,9 +85,13 @@ export function DetailPage({
   */
   const taskFailed = isTaskFailed(detail);
   const taskCompleted = isTaskCompleted(detail);
-  // Waiting beats stale, for the same reason as on the card: a report outranks an inference.
-  const stale =
-    detail.possibly_stale && isBusy(detail) && !awaiting && !idle && !taskFailed;
+  // Waiting beats disconnected, for the same reason as on the card: a report outranks an
+  // inference.
+  const disconnected =
+    isDisconnected(detail) && !awaiting && !idle && !taskFailed;
+  const heartbeatAgo = relativeTime(
+    detail.last_heartbeat_at ?? detail.last_activity_at,
+  );
 
   return (
     <article className="detail">
@@ -99,10 +104,14 @@ export function DetailPage({
           <h1 className="detail__title">{detail.title}</h1>
         </div>
         <span
-          className={`status${stale ? " status--stale" : ""}`}
+          className={`status${disconnected ? " status--stale" : ""}`}
           data-status={detail.status}
           data-idle={idle}
-          title={stale ? "As last reported; no activity since" : undefined}
+          title={
+            disconnected
+              ? `Last heartbeat ${heartbeatAgo === "now" ? "just now" : `${heartbeatAgo} ago`}; the agent may be asleep or offline`
+              : undefined
+          }
         >
           {statusLabel(detail)}
         </span>
@@ -162,11 +171,13 @@ export function DetailPage({
         </div>
       )}
 
-      {stale && (
+      {disconnected && (
         <div className="notice notice--warn" role="status">
           <span>
-            No activity reported for a while. The status above is what was last reported, not
-            an inference.
+            This session has not reported a heartbeat since{" "}
+            {absoluteTime(detail.last_heartbeat_at ?? detail.last_activity_at)}. It may be a
+            sleeping laptop, a dead network, or a process that is gone. Nothing here can tell
+            which — the status above is what was last reported, not an inference.
           </span>
         </div>
       )}
@@ -214,7 +225,7 @@ export function DetailPage({
       {/*
         Not offered while idle: this box's premise is "nothing is going to report an outcome",
         and for an idle session that is false — the heartbeat closes it when the process goes
-        away. Offering it would invite marking a live session interrupted.
+        away. Offering it would invite closing a live session on the strength of a quiet patch.
       */}
       {isBusy(detail) && !idle && (
         <CloseAction sessionId={detail.id} onClosed={() => void reload()} />
@@ -224,9 +235,9 @@ export function DetailPage({
         Needs attention had no exit: a `failed` row, or a `task_failed` verdict that landed
         after the run closed, offers nothing to act on, so it could ask forever. This is the
         reader's answer — and it is offered for anything that is currently asking, including a
-        running session that is blocked on you (docs/design.md §42). An `interrupted` session
+        running session that is blocked on you (docs/design.md §42). A `completed` session
         has nothing to dismiss, because it never enters the list: the status says how the run
-        stopped, and no action was ever owed for it (§42).
+        stopped, and no action was ever owed for it (§42, §44).
       */}
       {needsAttention(detail) && (
         <DismissAction
@@ -288,10 +299,10 @@ function CloseAction({
 
   const close = async () => {
     const confirmed = window.confirm(
-      "Close this session as interrupted?\n\n" +
+      "Close this session?\n\n" +
         "Use this when nothing is going to report an outcome. A closed session cannot be " +
-        "reopened, and this is recorded as interrupted rather than completed — the dashboard " +
-        "will not claim the work finished.",
+        "reopened, and it is recorded as closed by you rather than as a completion — the " +
+        "dashboard will not claim the work finished.",
     );
     if (!confirmed) return;
 
@@ -313,7 +324,7 @@ function CloseAction({
     <section className="closebox">
       <p className="closebox__why">
         Nothing is going to report an outcome for this session. If you know it is not coming
-        back, close it — the entry stays, marked interrupted rather than finished.
+        back, close it — the entry stays, marked closed by you rather than finished.
       </p>
 
       <div className="closebox__form">
@@ -334,8 +345,8 @@ function CloseAction({
  * that arrived after the run closed — there is nothing to act on: an ended session never
  * reports anything new, so the row could only accumulate. Closing records *how the run ended*;
  * this records that a person has *read* it. Different facts, and the second one must not be
- * written into the status. An `interrupted` row is not offered this, because it never enters
- * the list at all (§42).
+ * written into the status. A `completed` row is not offered this, because it never enters
+ * the list at all (§42, §44).
  *
  * **One-way on purpose.** There is no "put it back" button: the row never leaves the board (it
  * joins Finished, or Running while it is still open), and any report newer than the

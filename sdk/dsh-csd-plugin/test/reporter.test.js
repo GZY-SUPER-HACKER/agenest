@@ -49,15 +49,18 @@ test('an error turn keeps DSH’s message and code', () => {
   assert.match(outcome.summary, /upstream said no/)
 })
 
-test('an aborted turn is interrupted, and a hook cause is named', () => {
+test('an aborted turn is completed with a crash reason, and a hook cause is named', () => {
   const outcome = turnOutcome({ kind: 'aborted', reason: { kind: 'hook', reason: 'policy' } })
-  assert.equal(outcome.status, 'interrupted')
+  assert.equal(outcome.status, 'completed')
+  assert.equal(outcome.stop_reason, 'crash')
   assert.match(outcome.summary, /hook: policy/)
 })
 
-test('blocked and crash-orphaned turns are interrupted, not failed', () => {
-  assert.equal(turnOutcome({ kind: 'blocked' }).status, 'interrupted')
-  assert.equal(turnOutcome({ kind: 'interrupted' }).status, 'interrupted')
+test('blocked and crash-orphaned turns are completed with a crash reason, not failed', () => {
+  assert.equal(turnOutcome({ kind: 'blocked' }).status, 'completed')
+  assert.equal(turnOutcome({ kind: 'blocked' }).stop_reason, 'crash')
+  assert.equal(turnOutcome({ kind: 'interrupted' }).status, 'completed')
+  assert.equal(turnOutcome({ kind: 'interrupted' }).stop_reason, 'crash')
 })
 
 test('max-tokens still completed: the turn finished, the last step was capped', () => {

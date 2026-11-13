@@ -24,7 +24,7 @@
  * the process and can be resumed after a restart. A dashboard row built on it could only ever
  * say `running`, which would be a state nobody reported. A **turn** opens when the loop claims
  * input and closes with a reason DSH records itself (`turn/end.reason`), which maps onto
- * `completed` / `failed` / `interrupted` without a guess (design.md §28).
+ * `completed` / `failed` / `unknown` without a guess (design.md §28, §44).
  *
  * ## What is ignored, and why
  *
@@ -134,8 +134,8 @@ function isoTime(event, fallback) {
  * A dispose is DSH exiting: the retry budget that is right for a live turn (3 attempts with
  * backoff) is wrong here, because it would turn a dashboard outage into a SIGTERM that hangs
  * for fifteen seconds. A close that misses the deadline is dropped; the session then goes
- * `possibly_stale` instead of `interrupted`, which is the honest rendering of a report that
- * did not arrive.
+ * `disconnected` instead of reaching a reported ending, which is the honest rendering of a
+ * report that did not arrive (§44).
  */
 async function settleBriefly(promises, milliseconds = 2000) {
   let timer
@@ -560,10 +560,13 @@ export function install(ctx, rawConfig = {}, deps = {}) {
       return
     }
     try {
-      await client.updateSession(csdId, {
+      const body = {
         status: outcome.status,
         summary: cap(outcome.summary, MAX_SUMMARY),
-      })
+      }
+      // A reason describes an ending; the server ignores one on a running row (§44).
+      if (outcome.stop_reason) body.stop_reason = outcome.stop_reason
+      await client.updateSession(csdId, body)
       info(`dsh-csd-reporter: ${csdId} -> ${outcome.status}`)
     } finally {
       // Clear even when the patch failed: the client has already retried, and keeping the row
@@ -580,7 +583,8 @@ export function install(ctx, rawConfig = {}, deps = {}) {
     }
     try {
       await client.updateSession(turn.csdId, {
-        status: 'interrupted',
+        status: 'completed',
+        stop_reason: 'crash',
         summary: cap(summary, MAX_SUMMARY),
       })
     } finally {

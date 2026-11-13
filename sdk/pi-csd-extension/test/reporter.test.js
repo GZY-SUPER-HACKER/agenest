@@ -153,7 +153,11 @@ test('outcomeFor quotes Pi’s own stop reason and never guesses completed', () 
     status: 'completed',
     summary: 'Pi run completed at the output-token ceiling',
   })
-  assert.equal(outcomeFor('aborted').status, 'interrupted')
+  assert.deepEqual(outcomeFor('aborted'), {
+    status: 'completed',
+    stop_reason: 'user',
+    summary: 'Pi run was aborted',
+  })
 
   const failed = outcomeFor('error', 'provider said no')
   assert.equal(failed.status, 'failed')
@@ -431,7 +435,8 @@ test('message_end is enough to record the outcome when turn_end is not seen', as
   await pi.emit('agent_settled', undefined, CTX)
   await handle.flush()
 
-  assert.equal(client.of('update')[0].body.status, 'interrupted')
+  assert.equal(client.of('update')[0].body.status, 'completed')
+  assert.equal(client.of('update')[0].body.stop_reason, 'user')
 })
 
 test('an error stop reason finishes failed and quotes the error message', async () => {
@@ -488,7 +493,7 @@ test('the session id of the first run is not overwritten by the second', async (
   assert.equal(client.of('event').filter((e) => e.body.event_type === 'progress')[0].id, 'csd-1')
 })
 
-test('session_shutdown closes an open run as interrupted and stops the host timer', async () => {
+test('session_shutdown closes an open run as crashed and stops the host timer', async () => {
   const intervals = []
   const cleared = []
   const { pi, client, handle } = setup(
@@ -510,7 +515,8 @@ test('session_shutdown closes an open run as interrupted and stops the host time
   await handle.flush()
 
   assert.deepEqual(client.of('update')[0].body, {
-    status: 'interrupted',
+    status: 'completed',
+    stop_reason: 'crash',
     summary: 'Pi switched or exited before the run settled',
   })
   assert.deepEqual(cleared, intervals)
@@ -525,7 +531,8 @@ test('a new session closes a leftover run instead of leaving it running', async 
   await pi.emit('session_start', { reason: 'new' }, CTX)
   await handle.flush()
 
-  assert.equal(client.of('update')[0].body.status, 'interrupted')
+  assert.equal(client.of('update')[0].body.status, 'completed')
+  assert.equal(client.of('update')[0].body.stop_reason, 'crash')
 })
 
 test('a failed create is retried by the next event on the run', async () => {

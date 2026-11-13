@@ -33,6 +33,7 @@ from ..schemas import (
     SessionOut,
     SessionPatch,
     SessionStatus,
+    StopReason,
 )
 from ..services import session_service as ss
 from . import deps
@@ -142,7 +143,7 @@ def patch_session(
 def _projected_session(db: Database, settings: Settings, session_id: str) -> SessionOut:
     """A session as a response or an SSE frame must carry it.
 
-    `possibly_stale`, `last_event`, `last_verdict` and `dismissed` are computed per response;
+    `disconnected`, `last_event`, `last_verdict` and `dismissed` are computed per response;
     a route that wrote a row and returned the bare row would answer with them at their
     defaults, and the list hook would then erase the real values on screen.
     """
@@ -173,7 +174,7 @@ def close_session(
     broker: deps.BrokerDep,
     settings: deps.SettingsDep,
 ) -> SessionOut:
-    """Mark a session `interrupted` on a human's say-so.
+    """Mark a session `completed` + `stop_reason=user` on a human's say-so.
 
     The case this is for: a session created outside the reporting system — a hand-run
     `cpctl session start`, a script, a test fixture that outlived its test — has no owner and
@@ -185,9 +186,10 @@ def close_session(
     the row does know, and this endpoint is how they say so. It records a decision; it does
     not execute anything anywhere, which is what keeps it on the legal side of §1.
 
-    `interrupted`, never `completed`: the honest claim is "this stopped and no outcome was
-    reported", which is exactly what `interrupted` means. Guessing an outcome is the thing
-    the whole status model exists to avoid.
+    `completed`, but never with a verdict: the status says the run reached an ending, and
+    `stop_reason=user` says a person caused it. The frontend must therefore not draw the
+    green check a reported completion gets — "the work finished" is not this claim
+    (docs/design.md §44).
 
     Idempotent and safe to repeat: terminal states are sticky and first-write-wins (§3), so
     closing an already-closed session applies nothing and returns the session unchanged.
@@ -195,11 +197,12 @@ def close_session(
     Closing does **not** dismiss the row (§42). The two answer different questions — how it
     ended, and whether a person has read it — and a row can be asking for attention for a
     reason closing does not touch (a `task_failed` verdict survives the patch). A row whose
-    only fact was `running` simply leaves the live board; `interrupted` is not itself a
-    needs-attention report.
+    only fact was `running` simply leaves the live board; a `completed` close is not itself
+    a needs-attention report.
     """
     data = SessionPatch(
-        status=SessionStatus.interrupted,
+        status=SessionStatus.completed,
+        stop_reason=StopReason.user,
         summary="Closed from the dashboard — no reporter is going to report an outcome",
     )
     session, changed = ss.patch_session(db, session_id, data)
@@ -229,8 +232,8 @@ def dismiss_session(
 
     Needs-attention had no exit: a `failed` row, or a `task_failed` verdict that arrives after
     the run closed, offers nothing to click, so the list could only grow. This is that exit
-    (docs/design.md §42). `interrupted` rows are not in the list at all — the status says how
-    the run stopped, not that anything is owed to the reader.
+    (docs/design.md §42). A `completed` row — including one closed by hand — is not in the
+    list at all: the status says how the run stopped, not that anything is owed to the reader.
 
     It moves no status and executes nothing — the row still says how the run ended — and it
     is **self-clearing**: the stored watermark is compared with the newest display event, so

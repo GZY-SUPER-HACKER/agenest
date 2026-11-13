@@ -233,7 +233,7 @@ SESSION=$(cpctl session start --agent codex --title "$*" --project "$(basename "
 }
 
 if [ -n "$SESSION" ]; then
-  trap 'cpctl session finish --session "$SESSION" --status interrupted' INT TERM
+  trap 'cpctl session finish --session "$SESSION" --status completed --stop-reason crash' INT TERM
 fi
 
 codex "$@"
@@ -242,7 +242,7 @@ STATUS=$?
 if [ -n "$SESSION" ]; then
   case $STATUS in
     0)   cpctl session finish --session "$SESSION" --status completed --exit-code "$STATUS" ;;
-    130) cpctl session finish --session "$SESSION" --status interrupted --exit-code "$STATUS" ;;
+    130) cpctl session finish --session "$SESSION" --status completed --stop-reason crash --exit-code "$STATUS" ;;
     *)   cpctl session finish --session "$SESSION" --status failed --exit-code "$STATUS" ;;
   esac
 fi
@@ -343,9 +343,9 @@ export CSD_INGEST_TOKEN=<token>
 ./run-agent.sh --title "Fix the flaky test" -- codex "fix tests/session/test_compaction.py"
 ```
 
-It opens a session, traps INT/TERM to mark the session interrupted, runs the agent untouched
-(no output captured or parsed), and closes with the agent's real exit code. It exits with the
-agent's status, never the reporter's.
+It opens a session, traps INT/TERM to close it as `completed` with `stop_reason=crash`, runs
+the agent untouched (no output captured or parsed), and closes with the agent's real exit code.
+It exits with the agent's status, never the reporter's.
 
 **An agent that exits 0 can still have failed the task**, and nothing in its exit status says
 which. Give the wrapper a verifier and its exit code becomes a reported verdict:
@@ -719,7 +719,7 @@ All under `/api`. Interactive docs at `/api/docs`.
 | `GET` | `/api/sessions` | read | List, running first; `?status=&agent=&limit=&offset=` |
 | `GET` | `/api/sessions/{id}` | read | Detail with recent events |
 | `PATCH` | `/api/sessions/{id}` | ingest | Update status / metadata / summary |
-| `POST` | `/api/sessions/{id}/close` | access | Mark a session interrupted by hand |
+| `POST` | `/api/sessions/{id}/close` | access | Close a session by hand (`completed` + `stop_reason=user`) |
 | `POST` | `/api/sessions/{id}/dismiss` | access | Mark it read — it leaves needs-attention |
 | `POST` | `/api/sessions/{id}/events` | ingest | Report one event |
 | `GET` | `/api/sessions/{id}/events` | read | Event history, newest first |
@@ -781,9 +781,10 @@ thread instead; the page does this on every reconnect. See [§17](docs/design.md
 Three behaviours worth knowing, because they are easy to break by accident:
 
 **A finished session stays finished.** A late event or a late `PATCH` cannot move a session
-out of completed/failed/interrupted. Without this, the final status depends on network
-arrival order — a `session_failed` racing a retried `session_completed` would flip the
-verdict. Of two conflicting terminal reports, the first wins.
+out of completed/failed, and the first `stop_reason` (`user` / `crash` / `unknown`) wins with
+it. Without this, the final status depends on network arrival order — a `session_failed`
+racing a retried `session_completed` would flip the verdict. Of two conflicting terminal
+reports, the first wins.
 
 **Blocked-on-you is an event, not a status.** A session waiting for an answer is reported as
 an `awaiting_user` event and stays `running`; `POST /api/sessions` and `PATCH` have no way to
@@ -821,14 +822,20 @@ projected onto the session as `last_verdict`, separately from `last_event`, beca
 with a `task_failed` verdict sits under needs-attention, not finished; `task_completed` is the
 positive half and stays where it was. See design.md §40.
 
-**`interrupted` does not put a session under needs-attention.** Needs attention is built from
-three reports, each leaving you something to decide: `awaiting_user`, a `task_failed` verdict,
-and `failed`. `interrupted` only says the run stopped without an outcome — what a window
-reload, the connector's liveness check, a `--print` probe, or your own Close leaves behind — so
-those rows land in *Finished* with the pill still saying `interrupted`. The rail's *Failed*
-filter still lists them, because that answers "what went wrong", not "what needs me now"; a
-killed run whose work really is unfinished asks through a `task_failed` verdict instead. See
-design.md §42.
+**A plain `completed` does not put a session under needs-attention.** Needs attention is built
+from three reports, each leaving you something to decide: `awaiting_user`, a `task_failed`
+verdict, and `failed`. `completed` says the run reached an ending — reported, crashed, or
+closed by you — and `stop_reason` says which, so those rows land in *Finished* with the pill
+saying how it ended (`closed by you` for a manual close). The rail's *Failed* filter is for
+`failed` and `task_failed` only: `stop_reason=crash` also covers ordinary window reloads. A
+closed run whose work really is unfinished asks through a `task_failed` verdict instead. See
+design.md §42 and §44.
+
+**A running session that stops answering is `disconnected`.** The server derives it from
+`last_heartbeat_at` (falling back to any activity for reporters that send no heartbeat) and
+renders it as a quiet, hollow state — never red, because a sleeping laptop is not a failed
+task. It clears itself on the next heartbeat. `possibly_stale` remains as a deprecated alias
+for one release. See design.md §44.
 
 **Needs-attention has an exit.** A `failed` row — and a `task_failed` verdict that landed after
 the run closed — used to offer nothing to click, so it asked for attention forever.

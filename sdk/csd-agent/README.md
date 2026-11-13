@@ -302,8 +302,8 @@ it starting would be the worst possible bug in this package.
 
 The second job: a Claude Code killed with `SIGKILL`, or taken out by a dropped SSH session,
 never fires `SessionEnd`. Its session would sit at `running` forever. The process being gone
-*is* the report, so the heartbeat closes it as `interrupted` — and if that report cannot be
-delivered, the entry is kept and retried rather than forgotten.
+*is* the report, so the heartbeat closes it as `completed` with `stop_reason=crash` — and if
+that report cannot be delivered, the entry is kept and retried rather than forgotten.
 
 ## Which hooks are wired
 
