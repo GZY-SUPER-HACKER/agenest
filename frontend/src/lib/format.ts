@@ -50,7 +50,6 @@ export const STATUS_LABEL: Record<SessionStatus, string> = {
   running: "running",
   completed: "completed",
   failed: "failed",
-  interrupted: "interrupted",
   unknown: "unknown",
 };
 
@@ -80,6 +79,21 @@ export function doingLine(session: Session): string {
 /** True only for a *reported* alive state; staleness never counts as running. */
 export function isBusy(session: Session): boolean {
   return session.status === "running";
+}
+
+/**
+ * Is this session running but no longer answering?
+ *
+ * The server derives it from the heartbeat clock (`last_heartbeat_at`, falling back to
+ * `last_activity_at` for a reporter with no heartbeat at all), so this is an inference and
+ * must be rendered as one — the hollow/dashed treatment, never red. "Disconnected ≠ failed"
+ * is the whole point: a sleeping laptop is not a broken task (docs/design.md §44).
+ *
+ * Read `disconnected`, not the deprecated `possibly_stale` alias: the two are equal today,
+ * and the alias is what will be dropped.
+ */
+export function isDisconnected(session: Session): boolean {
+  return session.status === "running" && session.disconnected;
 }
 
 /**
@@ -171,14 +185,13 @@ export function isTaskCompleted(session: Session): boolean {
  * task-failed session counts regardless of `status` — a completed run that failed the task is
  * the ordinary shape (design.md §40).
  *
- * **`interrupted` is deliberately not one of them** (design.md §42). It says how the run
- * stopped — "no outcome was reported" — and it is written by the connector's liveness check
- * when a process vanishes, by a window reload, and by the close button a person already
- * pressed. None of those leaves anything for the reader to do, so treating the status as a
- * request turns the list into a log of run terminations: a screen of red dots that can only be
- * dismissed one at a time. A killed run that really did leave work unfinished asks through the
- * report that knows it — a `task_failed` verdict, which may arrive after the run closed — not
- * through the terminal vocabulary of the process.
+ * **A `completed` run is deliberately not one of them** (design.md §42, §44). It says how the
+ * run stopped — the ordinary ending, a crash, or a person pressing close — and none of those
+ * leaves anything for the reader to do. Treating the terminal status as a request turns the
+ * list into a log of run terminations: a screen of red dots that can only be dismissed one at
+ * a time. A closed run that really did leave work unfinished asks through the report that
+ * knows it — a `task_failed` verdict, which may arrive after the run closed — not through the
+ * terminal vocabulary of the process.
  *
  * `dismissed` is deliberately **not** part of the predicate: it is the reader's answer to the
  * question, not the question. Keeping them apart is what lets the detail page still say "this
@@ -203,13 +216,13 @@ export type SessionBucket = "attention" | "running" | "idle" | "finished";
  * 1. Attention outranks idle. A task-failed session whose last reply also ended is asking for
  *    a decision, and "the reply ended" is not an answer to it.
  * 2. A *dismissed* attention item falls through rather than vanishing. Ended, it joins
- *    Finished — the history disclosure, with its status pill still saying `interrupted` or
+ *    Finished — the history disclosure, with its status pill still saying `completed` or
  *    `failed`. Still running, it joins Running, because that is still the truth about it; it
  *    is only the request for attention that a person has answered (design.md §42).
  *
- * An `interrupted` session never takes the first branch: the status says how the run stopped,
- * not that anything is owed to the reader, so it falls straight through to Finished and keeps
- * its `interrupted` pill there (design.md §42).
+ * A plain `completed` session never takes the first branch: the status says how the run
+ * stopped, not that anything is owed to the reader, so it falls straight through to Finished
+ * and keeps its pill there (design.md §42, §44).
  */
 export function sessionBucket(session: Session): SessionBucket {
   if (needsAttention(session) && !session.dismissed) return "attention";
@@ -220,7 +233,13 @@ export function sessionBucket(session: Session): SessionBucket {
 
 /** The status a person should read. `idle` is a reported display state, not a status. */
 export function statusLabel(session: Session): string {
-  return isIdle(session) ? "idle" : STATUS_LABEL[session.status];
+  if (isIdle(session)) return "idle";
+  // `completed` alone would claim an outcome nobody reported. A person closing a row is not
+  // a finish, so the pill says who did it and keeps the neutral colour (docs/design.md §44).
+  if (session.status === "completed" && session.stop_reason === "user") {
+    return "closed by you";
+  }
+  return STATUS_LABEL[session.status];
 }
 
 export function relativeTime(iso: string | null): string {

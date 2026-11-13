@@ -138,6 +138,10 @@ class Client:
         }
         if args.started_at:
             body["started_at"] = args.started_at
+        # A reason describes an ending; sending one with `running` would be a claim about
+        # something that has not happened yet, so the server ignores it. Omit it entirely.
+        if args.stop_reason and body["status"] in ("completed", "failed"):
+            body["stop_reason"] = args.stop_reason
 
         session = self._request("POST", "/api/sessions", body)
         self._save_id(session["id"])
@@ -189,6 +193,8 @@ class Client:
     def finish(self, args: argparse.Namespace) -> int:
         session_id = self._resolve_session(args.session)
         body = {"status": args.status}
+        if args.stop_reason:
+            body["stop_reason"] = args.stop_reason
         if args.summary:
             body["summary"] = args.summary
         if args.exit_code is not None:
@@ -485,13 +491,17 @@ def _format_host_line(host: dict) -> str:
 
 def _format_line(session: dict) -> str:
     status = session["status"]
-    marker = {"running": "▶", "completed": "✓", "failed": "✗", "interrupted": "■"}.get(
-        status, "?"
-    )
-    stale = " [maybe offline]" if session.get("possibly_stale") else ""
+    reason = session.get("stop_reason")
+    # A run that ended because someone or something stopped it is not a green check: the
+    # tick belongs to an outcome the reporter observed, not to a closed row (design.md §44).
+    marker = {"running": "▶", "completed": "✓", "failed": "✗"}.get(status, "?")
+    if reason in ("user", "crash"):
+        marker = "■"
+    stale = " [disconnected]" if session.get("disconnected") else ""
+    closed = {"user": " [closed by you]", "crash": " [crashed]"}.get(reason, "")
     return (
         f"{marker} {status:<11} {session['agent_type']:<12} "
-        f"{session['title'][:48]:<48} {session['updated_at']}{stale}"
+        f"{session['title'][:48]:<48} {session['updated_at']}{closed}{stale}"
     )
 
 
@@ -531,8 +541,13 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--status",
         default="running",
-        choices=["running", "completed", "failed", "interrupted", "unknown"],
+        choices=["running", "completed", "failed", "unknown"],
         help="initial status (default: running)",
+    )
+    start.add_argument(
+        "--stop-reason",
+        choices=["user", "crash", "unknown"],
+        help="why the run already ended (only meaningful with a terminal --status)",
     )
     start.add_argument("--started-at", help="ISO-8601 start time, if reporting late")
     start.add_argument(
@@ -552,7 +567,12 @@ def build_parser() -> argparse.ArgumentParser:
         finish.add_argument(
             "--status",
             default="completed",
-            choices=["completed", "failed", "interrupted"],
+            choices=["completed", "failed"],
+        )
+        finish.add_argument(
+            "--stop-reason",
+            choices=["user", "crash", "unknown"],
+            help="who or what ended the run (default: omitted = nobody said)",
         )
         finish.add_argument("--summary", help="final result summary")
         finish.add_argument("--exit-code", type=int, help="process exit code, if known")
@@ -675,7 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("list", help="list recent sessions").add_argument(
-        "--status", choices=["running", "completed", "failed", "interrupted", "unknown"]
+        "--status", choices=["running", "completed", "failed", "unknown"]
     )
     sub.choices["list"].add_argument("--limit", type=int, default=100)
 

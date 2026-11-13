@@ -21,11 +21,10 @@
  * buckets makes the numbers stop adding up. A task-failed session works the same way even when
  * its status says `completed` — it is drawn under attention and *not* under finished.
  *
- * **`interrupted` is not in that list.** It says the run stopped without an outcome, which is
- * what a window reload, a vanished process, or a person closing the row leaves behind — none
- * of it asks for a decision. Those sessions join Finished with the pill still saying
- * `interrupted`; a killed run whose work really is unfinished asks through a `task_failed`
- * verdict (docs/design.md §42).
+ * **A `completed` run is not in that list.** It says the run reached an ending — reported,
+ * crashed, or closed by a person — which is not a request for a decision. Those sessions join
+ * Finished with the pill still saying how it ended; a closed run whose work really is
+ * unfinished asks through a `task_failed` verdict (docs/design.md §42, §44).
  *
  * A dismissed session falls through to Finished (or to Running, if it is still open): the
  * reader has answered the request for attention, and the row is history rather than a problem.
@@ -38,7 +37,7 @@
 import { useState } from "react";
 
 import { IconCheck, IconChevronRight, IconFolder } from "../components/icons";
-import { doingLine, isAwaitingUser, isBusy, isIdle, isTaskCompleted, isTaskFailed, relativeTime, sessionBucket } from "../lib/format";
+import { doingLine, isAwaitingUser, isDisconnected, isIdle, isTaskCompleted, isTaskFailed, relativeTime, sessionBucket } from "../lib/format";
 import type { Session } from "../types/api";
 
 export function OverviewPage({
@@ -66,7 +65,7 @@ export function OverviewPage({
   // Red when something actually ended badly — a failed task counts, even if the process
   // exited 0. A board whose only problem is a session waiting on an answer is not in a bad
   // state — it is waiting on you, which is amber. Dismissed rows are not in this list, because
-  // a person has already said the board no longer has a problem there. `interrupted` is not
+  // a person has already said the board no longer has a problem there. A plain `completed` is not
   // here either: it is not in the attention list to begin with (design.md §42).
   const endedBadly = attention.some(
     (s) => isTaskFailed(s) || s.status === "failed",
@@ -208,14 +207,14 @@ function SessionCard({
   */
   const taskFailed = isTaskFailed(session);
   const taskCompleted = isTaskCompleted(session);
-  const stale =
-    session.possibly_stale && isBusy(session) && !awaiting && !idle && !taskFailed;
+  const disconnected =
+    isDisconnected(session) && !awaiting && !idle && !taskFailed;
 
   return (
     <button
       className="card"
       data-status={session.status}
-      data-stale={stale}
+      data-stale={disconnected}
       data-awaiting={awaiting}
       data-idle={idle}
       data-task-failed={taskFailed}
@@ -233,7 +232,7 @@ function SessionCard({
       <div className="card__preview">
         <span className="card__bullet" aria-hidden="true" />
         <span className="card__preview-text">
-          {stale ? "No activity reported" : doingLine(session)}
+          {disconnected ? "disconnected · no heartbeat" : doingLine(session)}
         </span>
       </div>
 

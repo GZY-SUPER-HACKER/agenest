@@ -223,7 +223,8 @@ def on_session_start(payload: dict) -> None:
     for stale in tracked.for_cwd(cwd):
         if not tracked.process_alive(stale):
             result = runtime.cpctl("session", "finish", "--session", stale.csd_session_id,
-                                   "--status", "interrupted",
+                                   "--status", "completed",
+                                   "--stop-reason", "crash",
                                    "--summary", "Claude Code exited without reporting; "
                                                 "closed on restart")
             if not result.ok:
@@ -467,8 +468,8 @@ def on_session_end(payload: dict) -> None:
         # **Do not drop the entry.** Dropping it is how a failed report becomes permanent:
         # the dashboard keeps the session at `running` and the heartbeat, which is the only
         # thing left that could close it, no longer knows it exists. Leaving it tracked lets
-        # the next probe see the process gone and report `interrupted` — the honest ending
-        # for a session whose own report never landed (design.md §35).
+        # the next probe see the process gone and report `completed` + `stop_reason=crash` —
+        # the honest ending for a session whose own report never landed (design.md §35, §44).
         _log(f"SessionEnd: cpctl failed: {result.detail} "
              f"({entry.csd_session_id} left tracked for the heartbeat)")
         return

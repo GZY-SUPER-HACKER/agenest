@@ -46,7 +46,7 @@
    *
    *   green   — alive: running, connected, all clear
    *   neutral — finished cleanly, or unknown. The default, deliberately unexciting.
-   *   amber   — stopped being self-sufficient: interrupted, or blocked on an answer
+   *   amber   — blocked on an answer: the one status that asks something of you
    *   red     — failed
    *   hollow  — inferred, never reported (see .row[data-stale] and .status--stale)
    *

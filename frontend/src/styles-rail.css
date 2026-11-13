@@ -578,9 +578,6 @@
 .row[data-status="failed"] .row__dot {
   background: var(--dead);
 }
-.row[data-status="interrupted"] .row__dot {
-  background: var(--warn);
-}
 
 /* An inferred state gets a hollow marker: "we don't know" must not look like a report. */
 .row[data-stale="true"] .row__dot {
@@ -588,9 +585,9 @@
   box-shadow: inset 0 0 0 1.5px var(--quiet);
 }
 
-/* Blocked on the user: reported, not inferred, and amber for the same reason as interrupted
-   (styles.css — the colour scale answers "how much does this need you"). After the stale rule
-   so the report wins if a row is ever both. */
+/* Blocked on the user: reported, not inferred, and amber because it is the one status that
+   asks something of the reader (styles.css — the colour scale answers "how much does this
+   need you"). After the stale rule so the report wins if a row is ever both. */
 .row[data-awaiting="true"] .row__dot {
   background: var(--warn);
 }

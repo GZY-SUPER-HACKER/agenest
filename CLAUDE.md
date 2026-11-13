@@ -174,17 +174,21 @@ deploy/          installer, systemd unit, tailscale-prefly.sh
 These span multiple files and are pinned by tests. Break one and the test suite is the least
 of your problems.
 
-- **Terminal states are sticky, and first-write-wins.** Once completed/failed/interrupted, no
+- **Terminal states are sticky, and first-write-wins.** Once completed/failed, no
   late event or `PATCH` moves a session. Without this the verdict depends on network arrival
   order — a retried `session_completed` racing a `session_failed` would flip the outcome.
   `unknown` is a *wall* for automatic transitions but an explicit `PATCH` may still change it.
+  `stop_reason` (`user` / `crash` / `unknown`) follows the same rule: the first ending wins, so
+  a late crash report cannot overwrite the person who pressed Close (§44).
   That rule is only worth anything if it survives **concurrent** writers, which is why the
   storage layer is part of it: one SQLite connection per thread, `write()` takes the write lock
   with `BEGIN IMMEDIATE` before it reads, and an event never writes a status it did not change
   (§35).
 - **Status is reported, never inferred.** No completion from event count, elapsed time, or
-  output parsing. The one inference is `possibly_stale` — a display hint computed per
-  response, rendered as "maybe offline" in the quietest style so it cannot read as a status.
+  output parsing. The one inference is `disconnected` — a display hint computed per response
+  from `last_heartbeat_at` (falling back to `last_activity_at` for reporters with no heartbeat),
+  rendered in the quietest style so it cannot read as a status. `possibly_stale` is its
+  deprecated alias for one release (§44).
 - **`awaiting_user` is an event, not a status.** A blocked session stays `running`; the UI
   reads the newest *display* event. That is what lets it clear itself — a status would be
   sticky and a session that was merely waiting could never be reported as working again.
@@ -210,18 +214,20 @@ of your problems.
   the task still belongs under needs-attention. Never infer it from an exit code or the final
   prose (§40).
 - **A session leaves needs-attention when a person dismisses it, and a dismissal is a watermark.**
-  The list is three reports — `awaiting_user`, a `task_failed` verdict, `failed`; **`interrupted`
-  is not one of them**, because it says how the run stopped, not that anything is owed to the
-  reader (§42).
+  The list is three reports — `awaiting_user`, a `task_failed` verdict, `failed`; **a plain
+  `completed` is not one of them**, because it says how the run stopped (including "a person
+  closed it"), not that anything is owed to the reader (§42, §44).
   `dismissed_event_id` is compared with the newest *display* event on every response, so a verdict
   that lands after the acknowledgement asks again — and a heartbeat does not. It changes no
   status, writes no event, and moves neither `updated_at` nor `last_activity_at` (acknowledging
   is not activity). `sessionBucket` keeps the overview's tiles a partition: a dismissed ended
   session lands in Finished rather than vanishing. There is no un-dismiss route — a newer report
   is the way back — and the route is behind the access token exactly like close (§42).
-- **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` but
-  **not** `updated_at`, and is excluded from timelines and from `last_event`. Otherwise 40
-  pings during a test run bury the last thing the user actually did.
+- **Heartbeats renew liveness, not activity.** A heartbeat advances `last_activity_at` and
+  `last_heartbeat_at` but **not** `updated_at`, and is excluded from timelines and from
+  `last_event`. Otherwise 40 pings during a test run bury the last thing the user actually did.
+  The second clock exists because `disconnected` asks "is the agent still there", and
+  `last_activity_at` — which moves for any event — cannot answer it (§44).
 - **Idempotency is `event_key`, not timestamps.** A unique partial index plus a CLI-derived
   deterministic key from (session, type, message). Two reporters *can* legitimately report
   the same message in the same millisecond; a timestamp key would silently drop one.
@@ -648,7 +654,7 @@ rather than `EventSource` and `?token=`, because the routes behind it can execut
 `AgentPage` stays mounted while the dashboard is showing (hidden, not unmounted) so a run keeps
 streaming while you look at the sessions it is changing, and the tab bar can show a live dot.
 
-`possibly_stale` is rendered with a hollow dot and dashed capsule, reported statuses with a
+`disconnected` is rendered with a hollow dot and dashed capsule, reported statuses with a
 solid dot — the design rule is **an inferred state must never look like a reported one**.
 One `light-dark()` token set in `styles.css` drives both themes; switching is a `data-theme`
 attribute, so there is no second palette to keep in sync. `styles-agent.css` introduces no new

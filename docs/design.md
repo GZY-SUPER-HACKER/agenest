@@ -24,9 +24,11 @@ hardening. Do it as a separate service if at all.
 ## 2. Status is reported, never inferred.
 
 A session is `completed` because a reporter said `session_completed` — never because it went
-quiet, never because N events arrived. The one inference on the screen is
-`possibly_stale: true`, and it is rendered as "maybe offline", in the quietest style on the
-page, precisely so it cannot be mistaken for a status.
+quiet, never because N events arrived. The one inference on the screen is `disconnected: true`
+(the deprecated alias `possibly_stale` carries the same value), and it is rendered as
+"disconnected · no heartbeat", in the quietest style on the page, precisely so it cannot be
+mistaken for a status. §44 records why it is judged on the heartbeat clock rather than on
+"anything happened".
 
 This costs something real: a crashed agent with no wrapper shows as "running, maybe offline"
 forever instead of "failed". That is the correct trade. A dashboard that guesses wrong about
@@ -34,7 +36,7 @@ which task succeeded is worse than one that admits it does not know.
 
 ## 3. Terminal states are sticky, and first-write-wins.
 
-Once a session is completed/failed/interrupted, no event or PATCH can move it back. Of two
+Once a session is completed/failed, no event or PATCH can move it back. Of two
 conflicting terminal reports, the first one wins.
 
 Without this rule, the final status depends on network arrival order. A `session_failed`
@@ -71,8 +73,8 @@ it.
 
 Every `cpctl` command has a 3 s timeout, bounded exponential backoff with jitter, and exits
 3 on failure. `run-agent.sh` is written with `set -uo pipefail` and deliberately *not* `-e`,
-traps INT/TERM to mark the session interrupted, and exits with the agent's status rather than
-the reporter's.
+traps INT/TERM to close the session as `completed` + `stop_reason=crash`, and exits with the
+agent's status rather than the reporter's.
 
 The failure mode this prevents: an agent that aborts a 40-minute refactor at minute 39 because
 a dashboard on a phone was unreachable.
@@ -296,7 +298,7 @@ the dashboard. It is worth being precise about why it does not break §1.
 §1 forbids the dashboard from **acting on the machine the work runs on**. Closing a session
 changes a row in the dashboard's own database. Nothing is executed, no machine is contacted,
 no credential to an agent host exists. The blast radius of the control token is "someone can
-mark your sessions interrupted" — which is a nuisance, not an intrusion. That is a different
+mark your sessions closed" — which is a nuisance, not an intrusion. That is a different
 kind of thing from approving a tool call or sending input to an agent, and §1's "separate
 service" answer applies to those, not to this.
 
@@ -307,11 +309,13 @@ it. No heartbeat can probe it (there is no pid) and no `SessionEnd` will fire, s
 silence looks identical whether the work finished, crashed, or was never real. But a person
 looking at the row does know.
 
-**Why `interrupted`, never `completed`.** The honest claim is "this stopped and no outcome was
-reported", which is exactly what `interrupted` means. Letting the button say "completed" would
-be the dashboard guessing an outcome, which is the one thing the entire status model exists to
-avoid. It is also idempotent, because §3 makes it so: closing a finished session applies
-nothing, which is why the button is not even offered for one.
+**Why `completed` + `stop_reason=user`, not a bare `completed`.** The status says the run
+reached an ending; the reason says a person caused it. A bare `completed` would let the
+dashboard's green rendering claim an outcome nobody reported, and `failed` would blame the
+agent for someone else's decision. The pair is what keeps "I tidied the board" distinct from
+"the work finished" without a sixth status (§44). It is also idempotent, because §3 makes it
+so: closing a finished session applies nothing, which is why the button is not even offered
+for one.
 
 **Why a third credential rather than reusing the ingest token.** The UI is served to anyone
 who loads the URL. On a Funnel deployment that is the entire internet, so a button in it must
@@ -948,7 +952,7 @@ UI. It was rejected because it would make `sessions` mean two things:
 
 > **A session's status says how work ended. A host is reachable, which has no outcome.**
 
-`completed`, `failed` and `interrupted` are the vocabulary of a task finishing. A host row has
+`completed` and `failed` are the vocabulary of a task finishing. A host row has
 nothing to put there: it is `running` for as long as the box exists and then it is not, and the
 only honest status for "the machine went away" is one nobody will ever report. Filling a column
 with a value that can never be meaningful is how a schema starts lying, and every reader of that
@@ -1700,8 +1704,9 @@ at `turn/start`, closes at `turn/end` with a reason DSH itself wrote (`completed
 by branch. A reason this build has never seen closes as `unknown` — the vocabulary is
 merge-extensible, and treating a new value as success would turn uncertainty into a verdict.
 
-**The consequences of reading the log.** `session/disposed` mid-turn is reported as `interrupted`:
-the session leaving the store is the fact, the same shape as §14's gone process. Subagent child
+**The consequences of reading the log.** `session/disposed` mid-turn is closed as `completed`
+with `stop_reason=crash`: the session leaving the store is the fact, the same shape as §14's
+gone process. Subagent child
 sessions are ignored because their work is the parent turn's work; a row each would make one task
 look like several. `approval/asked` and `user-questions/request` become `awaiting_user` events,
 not a status, for §16b's reason: the state must clear itself when the user answers. The turn
@@ -1865,11 +1870,13 @@ opening a second row. Turns are `progress` events (`turn N complete`).
 
 **The verdict is `AssistantMessage.stopReason`.** `stop`, `toolUse` and `deferred` are
 `completed`; `length` is `completed` with a summary that names the output ceiling; `error` is
-`failed` with Pi's own `errorMessage`; `aborted` is `interrupted`. `pending`, a missing reason, or
+`failed` with Pi's own `errorMessage`; `aborted` is `completed` with `stop_reason=user` (a
+person stopped it). `pending`, a missing reason, or
 a value a future Pi adds is `unknown` — §2's rule applied to a second agent's vocabulary, because
 treating an unrecognized reason as success turns uncertainty into a verdict. Both `turn_end` and
 `message_end` record the reason; whichever arrives last wins, which on a retried run is the final
-answer. `session_shutdown` closes an open run as `interrupted` and is bounded to two seconds:
+answer. `session_shutdown` closes an open run as `completed` + `stop_reason=crash` and is
+bounded to two seconds:
 Pi awaits that hook, and a dead dashboard must not hold the agent's exit.
 
 **The dashboard's own personal agent is the same binary, and must not report — but only it.**
@@ -2058,8 +2065,8 @@ switch is in flight: `threadId` still names the agent being left.
 
 On 2026-10-21 a session on the school host was reported **completed** and the dashboard showed
 it `running` for the next 33 hours — with a `status_changed → completed` event on its own
-timeline. Closing it two days later wrote `interrupted`, because the row was still `running`
-and §3's guard had nothing to refuse.
+timeline. Closing it two days later wrote `interrupted` (since §44, `completed` +
+`stop_reason=unknown`), because the row was still `running` and §3's guard had nothing to refuse.
 
 The evidence is two lines in the same second. Five `SessionEnd` hooks fire when one VS Code
 window closes, so the host sent five PATCHes at once. The service answered one of them `500`
@@ -2133,7 +2140,7 @@ it, so there is no flag to reset and no expiry to tune.
 - **The status is untouched.** The session really is still open, so `running` remains the
   truthful status. `idle` is what the newest event says about *now*, and it is never written
   into the status column: closing the window still produces `completed` from `SessionEnd`, and
-  the heartbeat still closes a killed process as `interrupted`.
+  the heartbeat still closes a killed process as `completed` + `stop_reason=crash` (§44).
 - **A prompt is progress.** With `PostToolUse` deliberately unwired (the README's privacy
   argument), a long session's timeline otherwise held a single line. `UserPromptSubmit` now
   reports `Turn N: <first line of the prompt>` — the only honest "working on X" the connector
@@ -2425,8 +2432,8 @@ an agent can run to completion, exit 0, and still have failed the task. For `cla
 the ordinary case, and the dashboard used to file it under **Finished**.
 
 The split is between `status` and a **task verdict**. `status` keeps describing how the *run*
-ended — `completed` / `failed` / `interrupted` — and stays terminal, sticky and first-write-wins
-(§3). A verdict describes whether the *work* passed, and it is reported as an event:
+ended — `completed` / `failed`, with `stop_reason` saying who or what ended it (§44) — and stays
+terminal, sticky and first-write-wins (§3). A verdict describes whether the *work* passed, and it is reported as an event:
 `task_failed` or `task_completed`.
 
 ### The harness cannot decide it
@@ -2559,8 +2566,9 @@ answer (`awaiting_user`), a verdict says the work failed (`task_failed`), or the
 failed (`failed`). A session that stopped without any of those is history, and the board says
 so by filing it under Finished.
 
-**`interrupted` is not one of the three (2026-11-12).** The status means "this stopped and no
-outcome was reported" — the honest claim the close action already makes (§16). Its ordinary
+**`interrupted` is not one of the three (2026-11-12; the status itself became `completed` +
+a reason on 2026-11-13, §44).** The status meant "this stopped and no outcome was reported" —
+the honest claim the close action makes (§16). Its ordinary
 sources are the connector's liveness check finding a vanished process, an editor window being
 reloaded, a `--print` probe ending, and a person pressing Close. Not one of them is a request
 to the reader, and the last one is actively contradicted by treating it as one: the user has
@@ -2571,19 +2579,20 @@ red dots is not read, which defeats the one question the list exists to answer.
 
 The case the old rule was protecting is real but belongs somewhere else. A run killed mid-task
 may well have left the work unfinished — and "want to look at it" is served by Finished with
-the pill still saying `interrupted`, and by the rail's *Failed* filter, which keeps
-`interrupted` because that filter answers "what went wrong", not "what needs me now". If the
+the pill saying how it ended. The rail's *Failed* filter is deliberately not a home for them:
+`stop_reason=crash` also covers an ordinary window reload or a Pi shutdown, so that filter
+stays "what actually went wrong" — `failed` and a `task_failed` verdict (§44). If the
 work really did not pass, the report that knows it is `task_failed`, from the agent, a verifier,
 or the orchestrator, and it may arrive *after* the run closed (§40). `awaiting_user` cannot
 outlive the interruption either: it is gated on `running`, because a process that is gone
 cannot receive the answer.
 
-**The board still partitions.** `interrupted` is terminal, so an interrupted session is not
-idle and not busy; `sessionBucket` falls straight through to *Finished*, and the tile row keeps
-its invariant — `running + idle + attention + finished = total`. The status pill is unchanged
-(`interrupted`), the timeline is unchanged, and the colour rule is unchanged. Only the question
-"does this ask for a decision" changed its answer. A dismissed `interrupted` row is now the same
-row: there is nothing to dismiss, because it never asked.
+**The board still partitions.** A closed run is terminal, so it is not idle and not busy;
+`sessionBucket` falls straight through to *Finished*, and the tile row keeps its invariant —
+`running + idle + attention + finished = total`. The status pill says how it ended, the timeline
+is unchanged, and the colour rule is unchanged. Only the question "does this ask for a
+decision" changed its answer. A dismissed closed row is now the same row: there is nothing to
+dismiss, because it never asked.
 
 **Dismiss stays, for the rows that do ask.** `failed` — and a `task_failed` verdict that lands
 after the run closed — offers nothing to click, and an ended session never reports anything
@@ -2675,4 +2684,74 @@ go through the launcher and silently stops fixing the ones that do not (a test, 
 to fix one. Rejected: **`errors="surrogateescape"`.** It preserves the bytes and guarantees the
 server rejects them again; the point is to stop producing surrogates at all. A genuinely
 corrupt payload should say so (U+FFFD), not smuggle invalid Unicode into a title.
+
+
+## 44. A run that stopped is `completed`, and `stop_reason` says who stopped it
+
+`interrupted` was doing two jobs at once: it said a run had **ended** (so it could not be
+`running` any more) and it said **nobody reported an outcome**. The second half was never a
+property of the run — it was a property of the reporter. A vanished process, an editor window
+reload, a `--print` probe ending, and a person pressing Close all produced the same word, and
+none of them could say who caused it. The dashboard then had to render that word in one style
+for all four cases, which is why §42 had to teach the board that the status was not a request
+for attention: the message was too coarse to be a request.
+
+**The stored vocabulary is three states again.** `running`, `completed`, `failed` (`unknown`
+remains for a row created by an explicit "I do not know"). `completed` is deliberately neutral:
+it says the run reached an ending, not that the work succeeded. Whether the work succeeded is
+the task verdict (`task_completed` / `task_failed`, §40), which is a different fact and may
+arrive after the run closed.
+
+**`stop_reason` carries the missing half**: `user` (a person pressed Close), `crash` (a
+connector found the process gone, a session was disposed mid-turn, a Pi process exited before
+settling), or `unknown` (a legacy report, or a close nobody explained). `NULL` while running,
+and on a terminal row nobody explained. There is deliberately no `CHECK` constraint: a reporter
+with a vocabulary this build has not learned must still be able to report, and a server that
+500s on an unrecognised value has turned a vocabulary change into an outage.
+
+**First write wins, like the terminal status.** A late `crash` report must not overwrite the
+person who pressed Close; the reason describes the ending that actually happened. A reason is
+never written onto a `running` row — a run that has not ended has nothing to explain.
+
+**`disconnected` is the old display hint on a better clock.** `possibly_stale` already said
+"this running session has gone quiet", and it already cleared itself when activity resumed. What
+it did not have was the right definition of quiet: `last_activity_at` moves for any event, so a
+session that reports a note every hour but has lost its process looks alive forever. The new
+column `last_heartbeat_at` records the one thing that is a positive claim of liveness, and the
+hint is computed from it. **The fallback is load-bearing**: a hand-run `cpctl` session, and some
+Pi/DSH reporting shapes, send no heartbeat at all; judging those by a NULL heartbeat would turn
+"never had the feature" into "lost the agent" and grey out every such row the day this shipped.
+So the server uses `last_heartbeat_at or last_activity_at`.
+
+Nothing writes `disconnected`. It is computed per response, so one heartbeat makes it false
+again with no background job and no "un-disconnect" write — the same self-clearing shape as
+`awaiting_user` and `idle`. The old field survives one release as a deprecated alias with the
+same value, because a cached app bundle on a phone must not lose the hint the moment the server
+upgrades.
+
+**The archive is translated on read, not rewritten.** Historical rows keep `interrupted` in the
+database: it is what the reporter actually said, and a bulk `UPDATE` would be a migration that
+edits the record. `normalise_status()` maps it to `completed` + `unknown` at every boundary —
+row projection, duplicate-event path, and the request models. **Inbound** `interrupted` (the
+four SDKs and every binary already installed) is translated the same way instead of rejected:
+a 422 is a retry loop the reporter cannot fix, and a server that refuses to listen to an old
+agent has made an upgrade mandatory to keep observing work. `session_interrupted` stays in the
+event enum, because historical timelines must still render it, and remains a terminal event
+that closes as `completed` + `unknown`. `last_heartbeat_at` is backfilled once from the event
+log (`IS NULL`, so a second boot is a no-op) — without that, every historical running row would
+be labelled disconnected on the first response. The threshold is unchanged: 900 s against a
+5-minute heartbeat is three missed pings.
+
+Rejected: **a sixth status (`cancelled` / `stopped`).** It would immediately touch
+`TERMINAL_STATUSES`, `TERMINAL_EVENTS`, five frontend mappings, the CLI choices and four
+reporters' translation tables — and it still would not answer "who stopped it" for a crash. The
+reason is a field, not a state. Rejected: **keeping `interrupted` and adding `stop_reason`
+beside it.** Two vocabularies for the same fact invite exactly the drift §42 was written to
+undo; a row would eventually say `interrupted` + `user`, which is a contradiction. Rejected:
+**an UPDATE that rewrites historical `interrupted` rows.** It edits the archive, and the
+replacement reason (`unknown`) is no more informative than the word it replaces. Rejected:
+**a background job that flips statuses on silence.** §2 forbids the server inferring an ending
+from quiet, and the derived hint already gives the reader the information without claiming it
+as a status. Rejected: **a red rendering for `disconnected`.** The whole point is that a
+sleeping laptop is not a failed task; red stays reserved for `failed` and `task_failed`.
 

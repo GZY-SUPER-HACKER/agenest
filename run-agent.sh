@@ -95,11 +95,12 @@ fi
 
 # --- 2. report its own termination on a signal ----------------------------- #
 # SIGINT/SIGTERM kill the agent too, so this trap runs before the process dies. Without it
-# an interrupted session would sit at "running" forever and only ever be marked stale.
+# a signalled session would sit at "running" forever and only ever be marked disconnected.
 cleanup() {
   [ -n "$SESSION" ] || return 0
   "${CPCTL[@]}" session finish --session "$SESSION" \
-    --status interrupted --summary "Interrupted by signal" >/dev/null 2>&1 || true
+    --status completed --stop-reason crash \
+    --summary "Interrupted by signal" >/dev/null 2>&1 || true
 }
 trap cleanup INT TERM
 
@@ -154,7 +155,7 @@ if [ -n "$SESSION" ]; then
       130)
         # The trap usually catches this first; this is the belt to its braces.
         "${CPCTL[@]}" session finish --session "$SESSION" \
-          --status interrupted --exit-code "$STATUS" >/dev/null 2>&1 || true
+          --status completed --stop-reason crash --exit-code "$STATUS" >/dev/null 2>&1 || true
         ;;
       *)
         "${CPCTL[@]}" session finish --session "$SESSION" \

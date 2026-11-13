@@ -274,7 +274,7 @@ def _render_sessions(
         if s.workspace:
             detail.append(f"workspace: {s.workspace}")
         detail.append(f"started {_age(s.started_at)}")
-        if s.possibly_stale:
+        if s.disconnected:
             detail.append("possibly offline")
         out.append("  ".join(parts))
         out.append("  " + " · ".join(detail))

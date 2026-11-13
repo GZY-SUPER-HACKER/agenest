@@ -35,16 +35,45 @@ class ApiModel(BaseModel):
 # --------------------------------------------------------------------------- #
 class SessionStatus(str, Enum):
     running = "running"
+    #: A run that reached a terminal state, whatever the outcome was. Deliberately neutral:
+    #: whether the work succeeded is a *task verdict* (`task_completed` / `task_failed`), and
+    #: why the run stopped is `stop_reason` (docs/design.md §44). A manual close is
+    #: `completed` + `stop_reason="user"`, not a status of its own.
     completed = "completed"
     failed = "failed"
-    interrupted = "interrupted"
+    unknown = "unknown"
+
+
+class StopReason(str, Enum):
+    """Why a run reached a terminal state (docs/design.md §44).
+
+    `None` while running, and on a terminal row nobody explained. `unknown` is for a report
+    that closed the run without telling us why — which is what every legacy `interrupted`
+    becomes. Kept as data on the session rather than a sixth status so the closed set stays
+    closed and the frontend can choose one word and one colour per reason.
+    """
+
+    user = "user"
+    crash = "crash"
     unknown = "unknown"
 
 
 #: A late event or patch must never move a session *out* of these (spec 6.4, §12).
-TERMINAL_STATUSES = frozenset(
-    {SessionStatus.completed, SessionStatus.failed, SessionStatus.interrupted}
-)
+TERMINAL_STATUSES = frozenset({SessionStatus.completed, SessionStatus.failed})
+
+
+def normalise_status(value: str) -> tuple[SessionStatus, StopReason | None]:
+    """Translate a stored or reported status into the current closed set.
+
+    `interrupted` is no longer stored, but it is still **received**: four reporters and every
+    binary already installed on a machine send it, and a 422 would make an old reporter retry
+    a request that can never succeed. The server translates instead — the same rule the
+    non-terminal events follow — and records `unknown` as the reason, because a legacy
+    reporter had no vocabulary to say who stopped the run (docs/design.md §44).
+    """
+    if value == "interrupted":
+        return SessionStatus.completed, StopReason.unknown
+    return SessionStatus(value), None
 
 
 # --------------------------------------------------------------------------- #
@@ -93,17 +122,20 @@ class EventType(str, Enum):
 
 
 #: Event types that carry a terminal status. Reporting one of these closes the session.
+#: `session_interrupted` stays **accepted** as an alias for `session_completed`: the event
+#: type is still in the enum because historical timelines must keep rendering it, and an
+#: older reporter still sends it. Its `stop_reason` becomes `unknown` unless the payload
+#: says otherwise (docs/design.md §44).
 TERMINAL_EVENTS: dict[EventType, SessionStatus] = {
     EventType.session_completed: SessionStatus.completed,
     EventType.session_failed: SessionStatus.failed,
-    EventType.session_interrupted: SessionStatus.interrupted,
+    EventType.session_interrupted: SessionStatus.completed,
 }
 
 #: Reverse map, for synthesising the event that records an explicit status patch.
 TERMINAL_STATUS_TO_EVENT: dict[SessionStatus, EventType] = {
     SessionStatus.completed: EventType.session_completed,
     SessionStatus.failed: EventType.session_failed,
-    SessionStatus.interrupted: EventType.session_interrupted,
 }
 
 #: Events that only describe ongoing work; they must not resurrect a terminal session.
@@ -161,7 +193,22 @@ class SessionCreate(ApiModel):
     #: rows without it are grouped separately rather than attributed to a guess.
     host: str | None = Field(default=None, max_length=MAX_HOST)
     status: SessionStatus = SessionStatus.running
+    #: Only meaningful with a terminal `status`; ignored (and never stored) while running.
+    stop_reason: StopReason | None = None
     started_at: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_interrupted(cls, data: Any) -> Any:
+        """Accept `status: interrupted` from an older reporter and translate it.
+
+        Rejecting it here would be a 422 the reporter cannot fix without upgrading — and a
+        reporter that cannot report is worse than a server that translates (docs/design.md §44).
+        """
+        if isinstance(data, dict) and data.get("status") == "interrupted":
+            data = {**data, "status": SessionStatus.completed.value}
+            data.setdefault("stop_reason", StopReason.unknown.value)
+        return data
 
     @field_validator("agent_type", "title", "project_name", "workspace", "host")
     @classmethod
@@ -190,8 +237,21 @@ class SessionPatch(ApiModel):
     title: str | None = Field(default=None, max_length=MAX_TITLE)
     project_name: str | None = Field(default=None, max_length=MAX_PROJECT)
     status: SessionStatus | None = None
+    #: Why the run ended. Written only with (or after) a terminal status: a reason for a
+    #: running session would describe something that has not happened. First write wins, the
+    #: same rule the terminal status itself follows (docs/design.md §44).
+    stop_reason: StopReason | None = None
     summary: str | None = Field(default=None, max_length=MAX_SUMMARY)
     exit_code: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_interrupted(cls, data: Any) -> Any:
+        """Translate `status: interrupted`, the value every older `cpctl` still sends."""
+        if isinstance(data, dict) and data.get("status") == "interrupted":
+            data = {**data, "status": SessionStatus.completed.value}
+            data.setdefault("stop_reason", StopReason.unknown.value)
+        return data
 
     @field_validator("title", "project_name")
     @classmethod
@@ -297,14 +357,26 @@ class SessionOut(ApiModel):
     status: SessionStatus
     started_at: str
     last_activity_at: str
+    #: The newest heartbeat the server received, or `None` for a reporter that never sends
+    #: one. The `disconnected` hint is computed from this clock; `last_activity_at` is the
+    #: fallback, because "no heartbeat mechanism" is not "the heartbeat stopped".
+    last_heartbeat_at: str | None = None
     finished_at: str | None = None
     summary: str | None = None
     exit_code: int | None = None
+    #: Why the run ended, when the reporter said. `None` while running and on terminal rows
+    #: nobody explained. Displayed as a word (`closed by you`), never as a status.
+    stop_reason: StopReason | None = None
     created_at: str
     updated_at: str
     #: True when a running session has gone quiet past the stale threshold. Display-only
-    #: hint; the stored status is never rewritten to reflect it (spec 4.2).
+    #: hint; the stored status is never rewritten to reflect it (spec 4.2). Computed from the
+    #: heartbeat clock when there is one — see `disconnected` and docs/design.md §44.
     possibly_stale: bool = False
+    #: The same fact under the name the page now uses. **Deprecated alias**: equal to
+    #: `disconnected` for one release so a client that has not been updated does not go
+    #: blank; it will be removed when the app bundle is refreshed everywhere (§44).
+    disconnected: bool = False
     #: The newest non-heartbeat event. Present so a list view can say what a session is
     #: *doing* without fetching each one — the sidebar groups by harness, and a group of
     #: rows that only said "running" would tell the user nothing. `heartbeat` is excluded:

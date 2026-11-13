@@ -121,9 +121,6 @@
 .card[data-status="failed"] .card__dot {
   background: var(--dead);
 }
-.card[data-status="interrupted"] .card__dot {
-  background: var(--warn);
-}
 
 /* Inferred staleness gets a hollow marker here too — the rail has always drawn it this way,
    and the card was showing a solid dot directly beside the words "No activity reported".

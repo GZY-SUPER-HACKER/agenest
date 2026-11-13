@@ -103,9 +103,7 @@ cpctl event --type awaiting_user -m "needs approval to run the migration"
 cpctl session finish --status completed --summary "12 tests pass" --exit-code 0
 ```
 
-`session finish` 的状态是 `completed` / `failed` / `interrupted`。一旦进入终态就不会被后续事件
-改回去——这是故意的，否则最终结论会取决于网络到达顺序。`awaiting_user` 是事件而不是状态，
-所以下一次任意事件都能把它清掉。
+`session finish` 的状态是 `completed` / `failed`，另有 `--stop-reason user|crash|unknown` 说明是谁/什么让它结束的。一旦进入终态就不会被后续事件改回去——这是故意的，否则最终结论会取决于网络到达顺序；`stop_reason` 同样是先写先得。`awaiting_user` 是事件而不是状态，所以下一次任意事件都能把它清掉。
 
 同理，`turn_completed` 也是事件：它表示 agent 完成了一轮回复，但进程还开着（编辑器里的
 Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍然是 `running`——进程确实还在——
@@ -121,12 +119,18 @@ Claude Code 就是这种形态）。页面把它显示成 **idle**，状态仍�
 单独投影了 `last_verdict`。见 [docs/design.md](docs/design.md) §40。
 
 needs attention 现在是三份报告：`awaiting_user`、`task_failed`、`failed`——每一份都留下一个要人做
-的决定。`interrupted` 不在其中：它只说"进程停了、没有结果"，来源是窗口重载、connector 的存活探针、
-`--print` 探测、或者你自己按下的 Close，没有一个是请求。这类会话直接落到 **Finished**，状态胶囊照旧
-写 `interrupted`；rail 的 **Failed** 过滤器仍然包含它（那回答的是"哪里出了问题"，不是"现在要我
-做什么"）。真正"活没干完"的情况由关闭后才到的 `task_failed` 承担。在云端 5880 上，这条规则之前的
-数字是 205 行里 101 行在 Needs attention，几乎全是 `interrupted`，只能一行行 Dismiss。见
-[docs/design.md](docs/design.md) §42。
+的决定。普通的 `completed` 不在其中：它只说运行到了终点（可能是上报的结束、崩溃，或者你自己按下的
+Close），`stop_reason` 说明是哪一种，所以这类会话直接落到 **Finished**，状态胶囊写着它是怎么结束的
+（手动关闭会显示 `closed by you`）。rail 的 **Failed** 过滤器只保留 `failed` 和 `task_failed`：
+`stop_reason=crash` 也包含普通的窗口重载，不适合当作"哪里出了问题"。真正"活没干完"的情况由关闭后
+才到的 `task_failed` 承担。在云端 5880 上，这条规则之前的数字是 205 行里 101 行在 Needs
+attention，几乎全是旧的 `interrupted`，只能一行行 Dismiss。见 [docs/design.md](docs/design.md)
+§42、§44。
+
+运行中但不再应答的会话会显示成 **disconnected**：服务端用 `last_heartbeat_at`（没有心跳机制的
+上报端退回 `last_activity_at`）推导，渲染成安静的空心状态，**不用红色**——合盖的笔记本不是失败的
+任务；下一次心跳到达就自动恢复成 running。旧的 `possibly_stale` 字段保留一个版本作为 deprecated
+别名。见 §44。
 
 needs attention 以前只能进不能出：`failed` 的行、以及关闭后才到的 `task_failed`，都没有任何可点的
 动作。现在详情页可以 **Dismiss**——它表示"我看到了，这里没有我的事了"，记录的是人读过了，而不是任务

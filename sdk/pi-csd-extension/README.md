@@ -20,7 +20,7 @@ per turn would turn one task into a row per model call.
 | `turn_end` | A `progress` event, `turn N complete`. Not a boundary. |
 | `message_end` | Records the assistant message's `stopReason` / `errorMessage`. |
 | `agent_settled` | Closes the run: Pi has no retry, compaction retry or follow-up left. |
-| `session_shutdown` | Closes an open run as `interrupted` (Pi switched session or exited first). |
+| `session_shutdown` | Closes an open run as `completed` + `stop_reason=crash` (Pi switched session or exited first). |
 | `session_start` | Posts the host row and starts its five-minute timer. |
 
 `agent_start` is deliberately **not** the opener: it fires again for retries and compaction
@@ -35,7 +35,7 @@ The verdict is Pi's own `AssistantMessage.stopReason` (Pi 0.84.x), translated br
 | `stop`, `toolUse`, `deferred` | `completed` | |
 | `length` | `completed` | summary notes the output-token ceiling |
 | `error` | `failed` | summary quotes `errorMessage` |
-| `aborted` | `interrupted` | |
+| `aborted` | `completed` + `stop_reason=user` | |
 | `pending`, missing, unrecognized | `unknown` | never guessed as `completed` |
 
 There is no `awaiting_user`: Pi has no standard approval or permission event, and inferring one

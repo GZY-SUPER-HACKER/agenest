@@ -44,6 +44,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary           TEXT,
     exit_code         INTEGER,
     heartbeat_count   INTEGER NOT NULL DEFAULT 0,
+    -- When the agent last said, in so many words, that it is alive (docs/design.md §44).
+    -- `last_activity_at` means "anything happened"; this means "a heartbeat arrived". The
+    -- `disconnected` hint is computed from this clock, falling back to last_activity_at for a
+    -- reporter that has no heartbeat at all — that fallback is what keeps "no mechanism" from
+    -- being read as "the mechanism stopped".
+    last_heartbeat_at TEXT,
+    -- Why the run ended: 'user' | 'crash' | 'unknown'. NULL while running, and NULL on a
+    -- terminal row nobody explained. Deliberately no CHECK: an older or newer reporter's
+    -- vocabulary must not turn a report into a server error.
+    stop_reason       TEXT,
     -- A person has read this row and there is nothing left to do about it (docs/design.md §42).
     -- `dismissed_event_id` is the newest event at the moment of dismissal; the `dismissed`
     -- flag a client sees is computed by comparing it with the newest display event, so a
@@ -335,6 +345,14 @@ class Database:
             "sessions", {"dismissed_at": "TEXT", "dismissed_event_id": "INTEGER"}
         )
 
+        # "No message" and "it ended" are two different facts (§44). Both columns are
+        # nullable: an older row reads as "never heard a heartbeat" and "nobody said why",
+        # which is honest rather than a guess.
+        self._add_missing(
+            "sessions", {"last_heartbeat_at": "TEXT", "stop_reason": "TEXT"}
+        )
+        self._backfill_last_heartbeat()
+
         # What a connector declares about being driven (§24). Defaulted rather than nullable,
         # so a row written by an older connector reads as "did not ask" instead of "unknown".
         self._add_missing(
@@ -381,6 +399,37 @@ class Database:
             conn.executemany(
                 "UPDATE sessions SET title = 'New session', project_name = NULL WHERE id = ?",
                 [(session_id,) for session_id in ids],
+            )
+
+    def _backfill_last_heartbeat(self) -> None:
+        """Seed `last_heartbeat_at` from the event log, once (docs/design.md §44).
+
+        Without it, every historical running row would read as `disconnected` on the first
+        response: the column is NULL and NULL looks like "the heartbeat stopped", when for
+        many rows the truth is "the event log has the answer". The condition is `IS NULL`, so
+        a second boot is a no-op and a row that already has a value is never moved backward.
+
+        A row with no heartbeat event at all stays NULL and falls back to `last_activity_at`
+        at read time. That is deliberate: a hand-run `cpctl` session has no heartbeat
+        mechanism, and calling it disconnected would be an inference about a thing that does
+        not exist.
+        """
+        with self.write() as conn:
+            conn.execute(
+                """
+                UPDATE sessions
+                   SET last_heartbeat_at = (
+                       SELECT MAX(e.received_at) FROM session_events e
+                        WHERE e.session_id = sessions.id
+                          AND e.event_type = 'heartbeat'
+                   )
+                 WHERE last_heartbeat_at IS NULL
+                   AND EXISTS (
+                       SELECT 1 FROM session_events e
+                        WHERE e.session_id = sessions.id
+                          AND e.event_type = 'heartbeat'
+                   )
+                """
             )
 
     def _add_missing(self, table: str, columns: dict[str, str]) -> None:
