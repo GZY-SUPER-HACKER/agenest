@@ -2149,7 +2149,11 @@ it, so there is no flag to reset and no expiry to tune.
   otherwise collapse into one row.
 - **It is reported, not inferred.** The page never decides a session is idle because nothing
   has happened recently; quiet is still `possibly_stale`. Idle comes from a `Stop` Claude Code
-  fired, which is why it outranks staleness on the card, in the rail, and on the detail page.
+  fired, which is why it outranks staleness on the card, in the rail, and on the detail page
+  — **for as long as the session is still answering**. A reply boundary has no expiry of its
+  own: a laptop closed on an idle session keeps `turn_completed` as the newest event forever,
+  so once the heartbeat clock has been silent past the threshold (§44) the page reads
+  `disconnected` instead. One heartbeat restores both, because both come from the same clock.
 - **The word matters.** `idle` is drawn with the neutral palette and its own label, not the
   running green: alive-but-not-working is a different claim from alive-and-working, and the
   rail's `Running` filter, its node markers, the footer and the overview's tiles all count it
@@ -2728,6 +2732,18 @@ again with no background job and no "un-disconnect" write — the same self-clea
 `awaiting_user` and `idle`. The old field survives one release as a deprecated alias with the
 same value, because a cached app bundle on a phone must not lose the hint the moment the server
 upgrades.
+
+**A silent session is not `idle`.** The two answer different questions — "was it working a
+moment ago" (`turn_completed`) and "is anyone still there" (`disconnected`) — and when they
+disagree the liveness one wins, because it is the only one still falsifiable. A reply boundary
+never expires on its own: a laptop closed with an idle session reports no newer event, so the
+card would keep saying *between replies* about a machine that is off, and a session whose
+process was lost while it was idle would read as healthy indefinitely. So `isIdle` is gated on
+`!isDisconnected`, the pill says `disconnected`, and the row moves from the Idle tile to
+Running without leaving the partition. Both are derived from the same clock, so the next
+heartbeat restores the pill and the tile with no flag to reset. `awaiting_user` and a failed
+verdict still win over the hint: those are reports about the **work**, and `disconnected` is a
+statement about the reporter — a quiet board must not hide a question the agent asked.
 
 **The archive is translated on read, not rewritten.** Historical rows keep `interrupted` in the
 database: it is what the reporter actually said, and a bulk `UPDATE` would be a migration that

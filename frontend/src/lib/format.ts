@@ -91,6 +91,11 @@ export function isBusy(session: Session): boolean {
  *
  * Read `disconnected`, not the deprecated `possibly_stale` alias: the two are equal today,
  * and the alias is what will be dropped.
+ *
+ * This outranks every other display state on a running session except a verdict about the
+ * work, and `isIdle` reads it for that reason: a reply boundary is a claim about a moment,
+ * and once the heartbeat has been silent past the threshold the page cannot say what the
+ * session is doing now (docs/design.md §36, §44).
  */
 export function isDisconnected(session: Session): boolean {
   return session.status === "running" && session.disconnected;
@@ -129,10 +134,19 @@ export function isAwaitingUser(session: Session): boolean {
  * It is deliberately not a `SessionStatus`: the session *is* still running (the process is
  * open), it is just not working, which is the distinction the card needs and the status
  * column must not carry (docs/design.md §36).
+ *
+ * **Gated on the session still answering.** `turn_completed` has no expiry of its own: a
+ * laptop that was closed with an idle session keeps that event as its newest one forever, and
+ * reading it as "between replies" a week later is a claim the page cannot support. Once the
+ * heartbeat has been silent past the threshold the session is `disconnected`, which is the
+ * honest word for it — and one heartbeat brings it back here, because both are derived from
+ * the same clock (docs/design.md §36, §44).
  */
 export function isIdle(session: Session): boolean {
   return (
-    session.status === "running" && session.last_event?.event_type === "turn_completed"
+    session.status === "running" &&
+    !isDisconnected(session) &&
+    session.last_event?.event_type === "turn_completed"
   );
 }
 
@@ -233,6 +247,9 @@ export function sessionBucket(session: Session): SessionBucket {
 
 /** The status a person should read. `idle` is a reported display state, not a status. */
 export function statusLabel(session: Session): string {
+  // Before `idle`, and before the stored word: `running` claims the process is still there,
+  // and someone reading the pill wants to know that it stopped answering (docs/design.md §44).
+  if (isDisconnected(session)) return "disconnected";
   if (isIdle(session)) return "idle";
   // `completed` alone would claim an outcome nobody reported. A person closing a row is not
   // a finish, so the pill says who did it and keeps the neutral colour (docs/design.md §44).

@@ -15,6 +15,7 @@
  */
 import {
   isAwaitingUser,
+  isIdle,
   isTaskFailed,
   needsAttention,
   sessionBucket,
@@ -106,6 +107,22 @@ check("a task_completed verdict does not change the bucket",
   sessionBucket(session({ last_event: ev("turn_completed"), last_verdict: ev("task_completed") })),
   "idle");
 
+// A reply boundary is a claim about a moment, never about now. A laptop closed with an idle
+// session reports no newer event, so `turn_completed` would stay the newest one forever and
+// the page would keep saying "between replies" about a machine that is off. Liveness decides,
+// and the threshold is the server's (`last_heartbeat_at`, docs/design.md §44).
+const silentIdle = session({ last_event: ev("turn_completed"), disconnected: true });
+check("a session that stopped answering is not idle",
+  [isIdle(silentIdle), statusLabel(silentIdle)], [false, "disconnected"]);
+check("...and it moves from Idle to Running rather than inventing a fifth bucket",
+  sessionBucket(silentIdle), "running");
+
+// Both are derived from the same clock, so one heartbeat undoes both with no flag and no job.
+const answeredAgain = { ...silentIdle, disconnected: false };
+check("one heartbeat puts it back between replies",
+  [isIdle(answeredAgain), statusLabel(answeredAgain), sessionBucket(answeredAgain)],
+  [true, "idle", "idle"]);
+
 // `awaiting_user` must not outlive the process: a dead session cannot receive the answer, and
 // a late event must not park a finished row at the top of the board (§16b).
 check("a waiting event on a completed session is not waiting",
@@ -134,6 +151,9 @@ console.log("--- the tile row is still a partition ---");
 const board = [
   session({ id: "running-1", last_event: ev("progress") }),
   session({ id: "idle-1", last_event: ev("turn_completed") }),
+  // Inside the partition on purpose: a silent session is still `running` in the status column,
+  // so it must be counted by one of the four tiles rather than escaping the arithmetic.
+  session({ id: "disconnected-1", last_event: ev("turn_completed"), disconnected: true }),
   session({ id: "blocked-1", last_event: ev("awaiting_user") }),
   session({ id: "dismissed-blocked-1", last_event: ev("awaiting_user"), dismissed: true }),
   session({ id: "failed-1", status: "failed" }),
@@ -156,6 +176,8 @@ check("completed rows contribute to Finished alone",
 check("the attention tile holds only the three reports",
   board.filter((s) => sessionBucket(s) === "attention").map((s) => s.id).sort(),
   ["blocked-1", "failed-1", "task-failed-1"]);
+check("a silent session is counted under Running, not Idle",
+  [counts.running, counts.idle], [3, 1]);
 
 console.log();
 console.log(failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`);
