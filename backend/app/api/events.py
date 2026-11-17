@@ -28,18 +28,25 @@ router = APIRouter(tags=["events"])
     dependencies=[Depends(token_header)],
     summary="Report one event",
 )
-def report_event(
+async def report_event(
     session_id: str,
     data: EventCreate,
     db: deps.DbDep,
     broker: deps.BrokerDep,
     settings: deps.SettingsDep,
+    notifier: deps.AskNotifierDep,
+    supervisor: deps.SupervisorDep,
 ) -> EventAccepted:
     """Persist an event, derive session state, then publish to SSE.
 
     202 rather than 201: the event is durable, but the caller is a fire-and-forget reporter
     that must never block on the dashboard's state. A repeated `event_key` returns the
     original event and re-applies nothing.
+
+    An `awaiting_user` event also starts a relay to the personal agent (`agent/notify.py`).
+    It is scheduled, never awaited: the reporter's 202 is about the report, and an agent turn
+    can take minutes — blocking here would make the reporter retry an event the server had
+    already recorded.
     """
     try:
         result = ingest_event(db, session_id, data)
@@ -65,6 +72,14 @@ def report_event(
         # human. Publishing a frame without it would erase that answer on the client.
         ss.attach_last_events(db, [session])
         broker.publish_session(session, after=result.event.id)
+
+        # After the commit and after the frame, so a relay that fails cannot affect either.
+        # A duplicate report is someone else's retry of a fact already handled — relaying it
+        # again would be the agent telling the user the same thing twice.
+        if not result.duplicate:
+            notifier.schedule(
+                db=db, supervisor=supervisor, session=session, event=result.event
+            )
 
     return EventAccepted(session_id=session_id, event=result.event)
 

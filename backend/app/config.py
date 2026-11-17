@@ -195,6 +195,19 @@ class Settings:
     #: instruction that produces it ships with the service, and off would mean a blank screen while
     #: the agent works — which is the thing this feature exists to remove.
     agent_progress: bool = True
+    #: Whether a session's `awaiting_user` report is relayed to the personal agent, so the
+    #: user hears that a coding session is blocked without watching the board
+    #: (docs/design.md §45).
+    #:
+    #: On by default, for the same reason `agent_progress` is: this is the half of the product
+    #: that makes the agent worth having beside the board, and a switch nobody turns on is a
+    #: feature that does not exist. The cost is one agent turn per *newly blocked* turn — not
+    #: per repeated `Notification` — and it also requires an access token, because without one
+    #: the agent routes this would write into are disabled.
+    #:
+    #: Off is a real choice for an operator who does not want an automatic model call, or
+    #: whose agent is metered.
+    agent_notify_on_ask: bool = True
     #: A file naming the machines the agent may `ssh` to, and where the code is on them.
     #:
     #: The agent drives a remote coding agent the way its owner does — `ssh box 'cd repo && claude
@@ -379,6 +392,9 @@ class Settings:
             ),
             memory_model=_first_env("CSD_MEMORY_MODEL"),
             agent_progress=_flag(os.environ.get("CSD_AGENT_PROGRESS"), default=True),
+            agent_notify_on_ask=_flag(
+                os.environ.get("CSD_AGENT_NOTIFY_ON_ASK"), default=True
+            ),
             agent_machines_file=Path(machines_raw).resolve() if machines_raw else None,
             agent_key_dir=Path(key_dir_raw).resolve() if key_dir_raw else None,
             attachments_dir=(

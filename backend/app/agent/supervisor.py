@@ -29,6 +29,7 @@ from ..schemas import AgentMessageOut, AgentRole, AgentThreadDetailOut, cap_stri
 from ..stream import AgentBroker, agent_frame
 from . import attachments, endpoints, native_config, store
 from .appendix import attachments_channel_line
+from .notify_text import strip_instructions
 from .backends import (
     AgentBackend,
     BackendError,
@@ -734,7 +735,9 @@ class Supervisor:
             if row["title"] == "New conversation":
                 # A photo with no caption still needs a name in the list; the first file's name
                 # is the best one available, and saying "New conversation" forever is worse.
-                title = content.strip() or (files[0]["name"] if files else "")
+                title = strip_instructions(content).strip() or (
+                    files[0]["name"] if files else ""
+                )
                 if title:
                     store.rename_thread(self._db, thread_id, title[:TITLE_FROM_PROMPT])
                     self._emit_status(thread_id)
@@ -975,11 +978,20 @@ class Supervisor:
                 files.append(attachments.as_attachment(row))
                 known.add(attachment_id)
 
+        visible = attachments.strip(message.content, known)
+        if message.role is AgentRole.user:
+            # The instruction half of an automated prompt (`agent/notify.py`) is addressed to
+            # the agent and is not something a reader should meet as a bubble. The transcript
+            # keeps it — a re-read has to give the agent the same rules — and the wire model
+            # cuts at the marker, the same arrangement as the attachment channel line. Only
+            # user messages carry one, so an assistant quoting the marker keeps its words.
+            visible = strip_instructions(visible)
+
         return AgentMessageOut(
             id=message.id,
             thread_id=thread_id,
             role=message.role,
-            content=cap_string(attachments.strip(message.content, known)),
+            content=cap_string(visible),
             tool_name=message.tool_name,
             tool_call_id=message.tool_call_id,
             args=message.args,

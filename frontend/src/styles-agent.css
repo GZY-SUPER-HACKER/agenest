@@ -455,6 +455,25 @@
   border-bottom-left-radius: 14px;
 }
 
+/* --- automated relay: a blocked session, told to the agent (design.md §45) ---
+   It is a `user`-role message on the wire because the transcript belongs to the agent, but
+   the user did not write it. A dashed edge and a small tag say so without borrowing either
+   side's fill — the position still shows it was addressed to the agent, and the notice reads
+   as an artefact of the system rather than as one of the two speakers. */
+.bubble--notice {
+  border: 1px dashed var(--line);
+  background: light-dark(#fafafa, #202024);
+  color: light-dark(#303030, #e8e8ea);
+}
+
+.bubble__notice-tag {
+  display: block;
+  margin-bottom: 4px;
+  font-size: var(--t-caption);
+  color: var(--ink-3);
+  letter-spacing: 0.01em;
+}
+
 /* Spacing, not grouping. A same-side run used to pull together with a shared square corner so
    a burst read as one utterance. The agent does not speak that way any more: a checkpoint and
    the answer it introduces are separate statements, and gluing them made the pair read as one

@@ -198,6 +198,17 @@ Agent 页的行为边界、工具权限和记忆机制都在 [docs/design.md](do
 会话里的附件——它只是写在工作目录里的文件不会被发送，因为「agent 写过」不等于「agent 想
 交给你」。机制和取舍见 [docs/design.md](docs/design.md) §29。
 
+**会话卡住时，personal agent 会来告诉你。** 当某个 coding session 上报 `awaiting_user`
+（Claude Code 的权限提示、Codex 的审批、DSH 的 blocked turn），服务会给 personal agent 发一条
+提示，由它用自己的话在这个对话里告诉你：哪个项目、哪个会话、在等什么决定，以及上报端给出的
+选项。触发它的那条消息在页面上显示成 `agenest · notification` 气泡，而不是你发出去的话。
+
+这是一次真实的 agent turn，所以你在对话里直接回答，agent 可以接着去做（比如 `ssh` 到那台机器
+看）。它只在会话**刚**卡住时发一次——Claude Code 在阻塞期间会反复触发 `Notification`，被通知
+一次才是目的；安静的会话不会被推断成卡住，因为「在等」必须被上报。默认开启
+（`CSD_AGENT_NOTIFY_ON_ASK=0` 关闭），和所有 agent 路由一样需要 access token；发送是尽力而为，
+agent 连不上也不影响你在看板上找到它。见 [docs/design.md](docs/design.md) §45。
+
 ## 配置
 
 所有配置都走环境变量，没有写死在代码里的地址。完整的带注释列表在
@@ -211,6 +222,7 @@ Agent 页的行为边界、工具权限和记忆机制都在 [docs/design.md](do
 | `CSD_DB_PATH` | `backend/data/csd.sqlite3` | SQLite 文件，唯一持久状态 |
 | `CSD_STATIC_DIR` | 不设 | 构建后的前端目录；不设则只提供 API |
 | `CSD_AGENT_BACKEND` | `native` | 默认 personal agent |
+| `CSD_AGENT_NOTIFY_ON_ASK` | `1` | 会话上报 `awaiting_user` 时让 personal agent 告诉你；`0` 关闭。需要 `CSD_DASHBOARD_TOKEN` |
 | `CSD_PI_WORKSPACE` | 不设 | `native` 的工作目录；默认空 scratch 目录 |
 | `CSD_ATTACHMENTS_DIR` | 数据库旁的 `attachments/` | 会话收发的文件：上传、agent 的 outbox、已送达文件 |
 | `CSD_ATTACHMENT_MAX_MB` | `25` | 单个文件大小上限，上传时边写边计数 |

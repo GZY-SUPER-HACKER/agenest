@@ -26,6 +26,7 @@ from starlette.types import Scope
 
 from .agent import endpoints, hosts_view
 from .agent.backends import AgentBackend
+from .agent.notify import AskNotifier
 from .agent.supervisor import Supervisor
 from .api import agent as agent_api
 from .api import events as events_api
@@ -87,6 +88,9 @@ def create_app(
     supervisor = Supervisor(
         resolved_settings, resolved_db, resolved_agent_broker, backend=backend
     )
+    # Schedules the prompt a blocked session triggers (`agent/notify.py`). Owned by the app
+    # rather than by a route so its pending tasks can be cancelled on shutdown.
+    ask_notifier = AskNotifier(resolved_settings)
 
     # The machines file the agent reads, written once at boot so a fresh deployment has one
     # from the first prompt rather than from its first host heartbeat. A no-op without a
@@ -129,6 +133,10 @@ def create_app(
         # A backend that is down is reported on the agent page, not by refusing to boot.
         await supervisor.start()
         yield
+        # Cancel relays before stopping the agent and closing the database: a notification is
+        # the least important thing in flight, and one awaiting a model has no claim on
+        # shutdown.
+        await ask_notifier.aclose()
         # Stop the agent before closing the database: event handlers write to it.
         await supervisor.shutdown()
         resolved_db.close()
@@ -151,6 +159,7 @@ def create_app(
     app.state.broker = resolved_broker
     app.state.agent_broker = resolved_agent_broker
     app.state.supervisor = supervisor
+    app.state.ask_notifier = ask_notifier
 
     if resolved_settings.cors_origins:
         app.add_middleware(

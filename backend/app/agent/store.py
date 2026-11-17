@@ -177,8 +177,15 @@ def latest_thread(db: Database, *, backend: str | None = None) -> AgentThreadOut
 _session_lock = threading.Lock()
 
 
-def get_or_create_session(db: Database, *, backend: str) -> AgentThreadOut:
+def get_or_create_session(
+    db: Database, *, backend: str, title: str | None = None
+) -> AgentThreadOut:
     """The one conversation for `backend`, created if this is its first use.
+
+    `title` applies only when a row is created. It exists for a caller that opens the
+    conversation on the user's behalf — an automated notification (`agent/notify.py`) — which
+    would otherwise name the thread after the notification's own first line, because the
+    prompt is whatever the thread's first message is.
 
     **Serialised, not merely checked.** A plain "read it, insert if missing" has a window
     between the two, and two clients arriving inside it both read None and both insert — which
@@ -196,7 +203,7 @@ def get_or_create_session(db: Database, *, backend: str) -> AgentThreadOut:
         existing = latest_thread(db, backend=backend)
         if existing is not None:
             return existing
-        return create_thread(db, backend=backend)
+        return create_thread(db, backend=backend, title=title)
 
 
 __all__ = [
