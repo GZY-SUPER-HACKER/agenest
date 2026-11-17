@@ -192,6 +192,14 @@ of your problems.
 - **`awaiting_user` is an event, not a status.** A blocked session stays `running`; the UI
   reads the newest *display* event. That is what lets it clear itself — a status would be
   sticky and a session that was merely waiting could never be reported as working again.
+- **A blocked session is relayed to the personal agent, as a real prompt.** `agent/notify.py`
+  schedules a turn after the report has committed and been published; the reporter never waits
+  for it. The prompt carries visible facts, then `[agenest · instruction]` and rules the agent
+  must not show the user — `notify_text.strip_instructions` cuts the wire model there, and the
+  page renders the `[agenest]` marker as a notice bubble (§45). It fires **once per newly
+  blocked turn** (newest display event before it is not already `awaiting_user`), only while
+  `running`, only with `CSD_DASHBOARD_TOKEN`, and only when `CSD_AGENT_NOTIFY_ON_ASK` is on.
+  Failures are logged and swallowed: the report's 202 must never depend on reaching the agent.
 - **`turn_completed` (idle) is the same shape, for a different fact.** An editor keeps one
   Claude Code process alive for days, so `SessionEnd` cannot say the agent stopped working;
   `Stop` reports the reply boundary as an event, the UI shows `idle` while the status stays

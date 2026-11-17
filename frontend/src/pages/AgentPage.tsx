@@ -111,6 +111,17 @@ interface PendingFile {
 const MAX_ATTACHMENTS = 10;
 
 /**
+ * The first line of a prompt agenest sent on its own initiative (`agent/notify.py`).
+ *
+ * A blocked coding session is relayed to the personal agent as a real prompt, because the
+ * transcript belongs to the agent and this page must not invent an assistant row (§45). That
+ * prompt is a `user` message on the wire, so the marker is what lets the page draw it as a
+ * notice rather than as words the user typed. Kept in sync by hand with the Python literal;
+ * a mismatch degrades to an ordinary outgoing bubble, which is wrong but not harmful.
+ */
+const NOTIFY_MARKER = "[agenest]";
+
+/**
  * A message typed while the agent was working, waiting for the turn to end (design.md §33).
  *
  * It is the page's own state, not the agent's: nothing has been sent, so the agent has no
@@ -1481,19 +1492,29 @@ function Bubble({ message }: { message: AgentMessage }) {
   }
 
   const out = message.role === "user";
-  const hasText = message.content.trim().length > 0;
+  // A relay is a user-role message on the wire but not something the user said. It keeps the
+  // outgoing side's place in the layout — it is addressed to the agent — while wearing the
+  // notice styling and saying where it came from (design.md §45).
+  const notice = out && message.content.startsWith(NOTIFY_MARKER);
+  const text = notice
+    ? message.content.slice(NOTIFY_MARKER.length).trimStart()
+    : message.content;
+  const hasText = text.trim().length > 0;
   return (
     <div
-      className={`bubble ${out ? "bubble--out" : "bubble--in"}`}
+      className={`bubble ${out ? "bubble--out" : "bubble--in"}${notice ? " bubble--notice" : ""}`}
       data-out={out}
+      data-notice={notice ? "true" : undefined}
       data-attachment={message.attachments.length > 0 ? "true" : undefined}
     >
+      {notice && <span className="bubble__notice-tag">agenest · notification</span>}
       {/* Only agent prose is Markdown. A user's message is shown as typed — rendering it
           would reinterpret their own words back at them, which is presumptuous and, if they
-          pasted markup, wrong. */}
+          pasted markup, wrong. A relay is neither: it is server-composed text, so it stays
+          plain as well. */}
       {hasText &&
         (out ? (
-          <span className="bubble__text">{message.content}</span>
+          <span className="bubble__text">{text}</span>
         ) : (
           <Markdown text={message.content} />
         ))}

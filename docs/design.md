@@ -2771,3 +2771,74 @@ from quiet, and the derived hint already gives the reader the information withou
 as a status. Rejected: **a red rendering for `disconnected`.** The whole point is that a
 sleeping laptop is not a failed task; red stays reserved for `failed` and `task_failed`.
 
+
+
+## 45. A blocked session is told to the personal agent, and the agent tells the user
+
+The board answers "what are my agents doing" only for someone who is looking at it. A coding
+session that stops on a question (`awaiting_user`, §16b) is the one report that is *made of*
+being unseen: the agent is waiting, nothing moves, and the phone stays quiet. The personal
+agent is the thing the user actually talks to, so the relay belongs there:
+
+    session reports `awaiting_user` → this service prompts the personal agent
+    → the agent tells the user, in the conversation they already have open
+
+The direction is unchanged. This service is a client of the agent and dials it (§17), and
+nothing new executes here. The trigger is a report, not an inference: a quiet session is not
+relayed, however much it looks stuck.
+
+**A real agent turn, not a synthetic message.** The transcript belongs to the agent (§18).
+This service cannot write an assistant row into Pi's session file or nanobot's own record, and
+minting one in a table of ours would be a second, divergent answer to "what was said". So the
+notification is a prompt, and the agent phrases it. That is also what makes the feature worth
+having: if the user answers in the conversation, the agent can act on the answer, which a
+push notification cannot.
+
+**Two halves on the wire, one marker between them.** The prompt carries the facts the user may
+read (project, session, machine, the question, any options a reporter supplied) and then, after
+`[agenest · instruction]`, the rules the agent needs: relay this, do not use tools, do not
+answer the decision yourself. The transcript keeps both, because a re-read has to give the
+agent the same instructions. The wire model cuts at the marker (`notify_text.strip_instructions`,
+the same arrangement as the attachment channel line), and the page renders the marker as an
+`agenest · notification` tag in a dashed bubble — a relay is a `user`-role message on the wire,
+but the user did not write it, and the page must not pretend they did.
+
+**A newly blocked turn, not every repeated notification.** Claude Code re-fires `Notification`
+while a prompt stays open, and Codex/DSH use the same event type for approvals. The relay fires
+only when the newest display event before this one is not already `awaiting_user`: the session
+just became blocked, so there is something the user has not been told. That is stateless — the
+event timeline is the state — survives a restart, and costs nothing when a reporter repeats
+itself. A block that is approved without any reported event and asks again is not relayed a
+second time; the board still shows it, and the alternative (one model turn per permission
+prompt) is a conversation the user learns to mute.
+
+**Best-effort, scheduled, and off without a token.** The relay runs as a task after the report
+has been committed and published, never inside the reporter's request: the 202 is about the
+report, an agent turn can take minutes, and a reporter that blocked on it would retry an event
+the server already holds. Every failure — no agent configured, the process gone, a model error
+— is logged and swallowed. Two conditions disable it entirely: `CSD_AGENT_NOTIFY_ON_ASK=0`, and
+an unset access token. Without a token every `/api/agent/*` route is disabled (§22), so a relay
+would create a conversation nobody can open or answer.
+
+The thread is the agent's one conversation (§18), created with the title `Session notifications`
+when it does not exist yet — the prompt's own first line would otherwise name the conversation
+after the notification. If the user has since talked to the agent, the relay joins that thread,
+which is the point: the answer goes where the conversation is.
+
+Rejected: **a phone push for every ask.** It notifies, but it cannot receive the decision, and
+the user then has to open a different surface to answer — the personal agent can finish the
+errand. (Web push is a separate capability with its own subscription store; if it returns, it
+should subscribe to the same report, not replace this.) Rejected: **writing an assistant row
+directly.** It is cheaper and instant, but it is a lie about who wrote the transcript, and no
+backend's protocol accepts it. Rejected: **showing the instruction half to the user.** The
+scaffolding is not the message, and a transcript that reads like a system prompt teaches the
+user to skip the one bubble that matters. Rejected: **relaying on every `Notification`.** A
+model call per repeated prompt is the fastest way to make the agent feel like spam.
+
+**The payload convention for a decision.** `message` stays the one-line summary the board
+shows. A reporter that knows more may put the full question in `payload.question` and the
+choices in `payload.options` (or `choices`), as strings or as objects wrapping one in
+`label` / `text` / `title` / `value` / `name`. Reading it is deliberately tolerant: an
+unreadable shape costs the option list, never the notification. None of the shipped reporters
+sends options today — Claude Code's `Notification` carries a sentence, and Codex/DSH name a
+tool — so this is forward-looking, not a contract an installed binary already exercises.

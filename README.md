@@ -497,6 +497,22 @@ continued from Telegram appears from that point on and is not retroactively fill
 that started and never finished has no outcome, and the page will not invent one — the same rule
 [§2](docs/design.md) applies to session status, at a much shorter timescale.
 
+### A blocked session tells you
+
+When a coding session reports `awaiting_user` — Claude Code's permission prompt, Codex's
+approval request, DSH's blocked turn — the personal agent gets a prompt and tells you about it
+in the conversation, in its own words: which project and session, what it is waiting on, and
+any options the reporter supplied. The page draws the trigger as an `agenest · notification`
+bubble, not as something you typed.
+
+This is a real agent turn, so if you answer in that conversation the agent can act on it (for
+example, `ssh` to the host and look). It fires when a session **newly** blocks — Claude Code
+re-fires `Notification` while a prompt stays open, and being told once is the point — and never
+for a quiet session: waiting is reported, never inferred. It is on by default
+(`CSD_AGENT_NOTIFY_ON_ASK=0` turns it off), needs the access token like every other agent
+route, and is best-effort: if the agent is unreachable, you still find the session on the
+board.
+
 ### Files and images
 
 The composer has a `+` to the left of the input: **Photo** opens the picture picker, **File**
@@ -683,6 +699,7 @@ the annotated list.
 | `CSD_DASHBOARD_TOKEN` | *(unset)* | The one token for the page: reads, `close`, and everything under `/api/agent/*` that drives the agent (the three self-onboarding routes are open — §25). Unset leaves reads open and everything that *acts* disabled (403). |
 | `CSD_STALE_AFTER_SECONDS` | `900` | Quiet period before the UI says "maybe offline". |
 | `CSD_AGENT_PROGRESS` | `1` | Ask the agent for one progress line per stage. `0` turns the narration off. |
+| `CSD_AGENT_NOTIFY_ON_ASK` | `1` | Relay a session's `awaiting_user` report to the personal agent, so it tells you. `0` turns the relay off. Needs `CSD_DASHBOARD_TOKEN`. |
 | `CSD_AGENT_MACHINES_FILE` | `<workspace>/MACHINES.md` | Your own notes about the machines the agent may `ssh` to (`cd` targets, which agent is installed); appended to its system prompt every message. Write it by hand. |
 | `CSD_AGENT_KEY_DIR` | `$HOME/.ssh` | Where keys minted for approved hosts are kept (0600). `$HOME` is the agent's own home under systemd, so the default is where `ssh` already looks. |
 | `CSD_ATTACHMENTS_DIR` | `<db dir>/attachments` | Where files carried by the conversation live: uploads, the agent's outbox, and delivered files. |

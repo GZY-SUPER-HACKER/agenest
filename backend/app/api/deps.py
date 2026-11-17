@@ -9,6 +9,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from ..agent.notify import AskNotifier
 from ..agent.supervisor import Supervisor
 from ..config import Settings
 from ..database import Database
@@ -35,8 +36,13 @@ def get_supervisor(request: Request) -> Supervisor:
     return request.app.state.supervisor
 
 
+def get_ask_notifier(request: Request) -> AskNotifier:
+    return request.app.state.ask_notifier
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DbDep = Annotated[Database, Depends(get_db)]
 BrokerDep = Annotated[Broker, Depends(get_broker)]
 AgentBrokerDep = Annotated[AgentBroker, Depends(get_agent_broker)]
 SupervisorDep = Annotated[Supervisor, Depends(get_supervisor)]
+AskNotifierDep = Annotated[AskNotifier, Depends(get_ask_notifier)]
